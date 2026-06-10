@@ -3,6 +3,12 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 
+window.addEventListener('message', (e) => {
+  if (e.data?.type === 'portfolio-theme') {
+    document.documentElement.setAttribute('data-theme', e.data.theme)
+  }
+})
+
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <App />

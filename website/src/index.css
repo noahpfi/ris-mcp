@@ -27,6 +27,23 @@ body {
   overflow-x: hidden;
 }
 
+.in-iframe ::-webkit-scrollbar {
+  width: 0px;
+  height: 0px;
+}
+
+.in-iframe ::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.in-iframe ::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+
+.in-iframe * {
+  scrollbar-color: var(--border) var(--bg);
+}
+
 /* ── Tokens ───────────────────────────────────────────────────── */
 :root {
   --bg: #F9F7F3;

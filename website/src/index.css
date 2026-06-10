@@ -47,6 +47,18 @@ body {
   }
 }
 
+[data-theme="dark"] {
+  --bg:         #111110;
+  --bg-alt:     #171614;
+  --surface:    #1E1D1A;
+  --card:       #242320;
+  --text:       #E8E4DC;
+  --text-2:     #B0AC9F;
+  --text-muted: #6A6760;
+  --border:     #2E2C28;
+  --amber:      #C88050;
+}
+
 /* ── Noise overlay ────────────────────────────────────────────── */
 .noise-overlay {
   position: fixed; inset: 0;

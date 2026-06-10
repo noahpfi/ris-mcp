@@ -75,7 +75,7 @@ def parse_law_outline(html: str) -> str:
     for block in tree.css("div.contentBlock"):
         g1 = block.css_first("h4.UeberschrG1, h4.UeberschrG1-AfterG2")
         if g1:
-            current_section = g1.text(strip=True)
+            current_section = _clean(g1.text(separator=" "))
 
         heading = block.css_first("h4.UeberschrPara")
         raw = block.text(separator=" ")

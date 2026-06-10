@@ -8,7 +8,7 @@ from typing import Annotated
 from mcp.server.fastmcp import FastMCP
 
 from . import ris_client as rc
-from .content import html_to_markdown, extract_metadata_blocks
+from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
 from . import index as fts_index
 
 mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
@@ -161,6 +161,41 @@ async def get_statute(
                 parts.append("")
 
     return "\n".join(parts) if parts else f"Statute '{name}' not found."
+
+
+@mcp.tool()
+async def get_law_outline(
+    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
+) -> str:
+    """Return full table of contents for a statute: § numbers with their headings, grouped by section.
+
+    Use this to discover which paragraph covers a topic without relying on prior knowledge.
+    """
+    titel = law.strip()
+    refs, _ = await rc.search_bundesrecht(
+        titel=titel,
+        abschnitt_von="0",
+        abschnitt_bis="0",
+        abschnitt_typ="Paragraph",
+        pro_seite="Ten",
+    )
+    if not refs:
+        refs, _ = await rc.search_bundesrecht(titel=titel, pro_seite="Ten")
+    if not refs:
+        return f"Law '{law}' not found."
+
+    ref = rc.best_law_match(refs, titel)
+    meta = rc._meta_from_ref(ref)
+    outline_url = meta["outline_url"]
+    if not outline_url:
+        return f"No outline URL for '{law}'."
+
+    html = await rc._get_html(outline_url)
+    outline = parse_law_outline(html)
+    if not outline:
+        return f"Could not parse outline for '{law}'."
+
+    return f"# {meta['short_title']} — Table of Contents\n\n{outline}"
 
 
 @mcp.tool()

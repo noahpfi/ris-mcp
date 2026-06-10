@@ -116,7 +116,7 @@ async def crawl(pages: int = 0, delay: float = 1.0, resume: bool = True) -> int:
         if not refs:
             break
 
-        htmls = await _fetch_batch(refs, batch_size=10, delay=1.0)
+        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs])
 
         with _conn() as conn:
             for ref, html in zip(refs, htmls):
@@ -138,7 +138,6 @@ async def crawl(pages: int = 0, delay: float = 1.0, resume: bool = True) -> int:
             break
 
         page += 1
-        await asyncio.sleep(delay)
 
     return indexed
 

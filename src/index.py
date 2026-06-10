@@ -71,12 +71,38 @@ def doc_count() -> int:
         return 0
 
 
-async def crawl(pages: int = 0, delay: float = 0.5) -> int:
+async def _fetch_batch(refs: list, batch_size: int = 5, delay: float = 1.0) -> list[str]:
+    """Fetch HTML for refs in small batches to avoid hammering the server."""
+    results = []
+    for i in range(0, len(refs), batch_size):
+        batch = refs[i:i + batch_size]
+        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in batch])
+        results.extend(htmls)
+        if i + batch_size < len(refs):
+            await asyncio.sleep(delay)
+    return results
+
+
+def _resume_page() -> int:
+    try:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM crawl_meta WHERE key = 'last_page'"
+            ).fetchone()
+            return int(row[0]) if row else 1
+    except sqlite3.OperationalError:
+        return 1
+
+
+async def crawl(pages: int = 0, delay: float = 1.0, resume: bool = True) -> int:
     """Crawl BrKons and index into FTS. pages=0 means all."""
     init_db()
     indexed = 0
-    page = 1
+    page = _resume_page() if resume else 1
     total = None
+
+    if page > 1:
+        logger.info("Resuming from page %d", page)
 
     while True:
         refs, hits = await rc.search_bundesrecht(
@@ -85,12 +111,12 @@ async def crawl(pages: int = 0, delay: float = 0.5) -> int:
         )
         if total is None:
             total = hits
-            logger.info("Crawl started: %d total docs", total)
+            logger.info("Crawl started: %d total docs, starting at page %d", total, page)
 
         if not refs:
             break
 
-        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs])
+        htmls = await _fetch_batch(refs, batch_size=5, delay=1.0)
 
         with _conn() as conn:
             for ref, html in zip(refs, htmls):
@@ -105,11 +131,10 @@ async def crawl(pages: int = 0, delay: float = 0.5) -> int:
             )
 
         indexed += len(refs)
-        logger.info("Page %d: indexed %d docs (total so far: %d)", page, len(refs), indexed)
+        logger.info("Page %d/%d: +%d docs (%d total indexed)",
+                    page, (total // 100) + 1, len(refs), indexed)
 
         if pages and page >= pages:
-            break
-        if indexed >= hits:
             break
 
         page += 1

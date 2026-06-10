@@ -116,3 +116,11 @@ async def crawl(pages: int = 0, delay: float = 0.5) -> int:
         await asyncio.sleep(delay)
 
     return indexed
+
+
+if __name__ == "__main__":
+    import sys
+    pages = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    logging.basicConfig(level=logging.INFO)
+    n = asyncio.run(crawl(pages=pages))
+    print(f"Indexed {n} documents")

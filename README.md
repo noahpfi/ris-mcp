@@ -18,7 +18,7 @@ Exposes Austrian federal law (Bundesrecht) to LLMs via the public RIS OGD API v2
 ## Install
 
 ```bash
-uv sync
+pip install -r requirements.txt
 ```
 
 ## Run (MCP Inspector)

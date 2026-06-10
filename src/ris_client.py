@@ -119,6 +119,8 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
         "paragraph_number": brkons.get("Paragraphnummer", ""),
         "kundmachung": brkons.get("Kundmachungsorgan", ""),
         "in_force_from": brkons.get("Inkrafttretensdatum", ""),
+        "repealed": brkons.get("Ausserkrafttretensdatum", ""),
+        "outline_url": brkons.get("GesamteRechtsvorschriftUrl", ""),
         "doc_type": brkons.get("Dokumenttyp", ""),
         "eli": bundesrecht.get("Eli", ""),
     }
@@ -186,19 +188,21 @@ async def search_bgbl_auth(
 
 
 def best_law_match(refs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
-    """Pick the ref whose abbreviation or short title best matches query."""
+    """Pick the ref whose abbreviation or short title best matches query, preferring live laws."""
     if not refs:
         return None
+    live = [r for r in refs if not _meta_from_ref(r)["repealed"]]
+    pool = live if live else refs
     q = query.strip().upper()
-    for ref in refs:
+    for ref in pool:
         m = _meta_from_ref(ref)
         if m["abbreviation"].upper() == q:
             return ref
-    for ref in refs:
+    for ref in pool:
         m = _meta_from_ref(ref)
         if m["short_title"].upper() == q:
             return ref
-    return refs[0]
+    return pool[0]
 
 
 async def fetch_document_html(ref: dict[str, Any]) -> str:

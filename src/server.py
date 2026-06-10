@@ -1,0 +1,251 @@
+"""RIS MCP server — Austrian federal law for LLMs."""
+from __future__ import annotations
+
+import asyncio
+from typing import Annotated
+
+from mcp.server.fastmcp import FastMCP
+
+from . import ris_client as rc
+from .aliases import resolve_law_name
+from .content import html_to_markdown, extract_metadata_blocks
+
+mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
+
+
+@mcp.tool()
+async def search_law(
+    query: Annotated[str, "Full-text search terms"],
+    law: Annotated[str, "Optional law name or abbreviation to scope the search (e.g. ABGB, StGB)"] = "",
+) -> str:
+    """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute."""
+    titel = resolve_law_name(law) if law else ""
+    refs, total = await rc.search_bundesrecht(suchworte=query, titel=titel, pro_seite="Ten")
+
+    if not refs:
+        return "No results found."
+
+    lines = [f"Found {total} result(s). Showing first {len(refs)}.\n"]
+    for ref in refs:
+        meta = rc._meta_from_ref(ref)
+        lines.append(f"**{meta['short_title']}** {meta['paragraph']}")
+        lines.append(f"  Document: {meta['document_id']}")
+        lines.append(f"  In force: {meta['in_force_from']}")
+        lines.append(f"  URL: {meta['doc_url']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_paragraph(
+    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
+    paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
+    to_paragraph: Annotated[str, "End of range (optional), e.g. 1300"] = "",
+) -> str:
+    """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
+    titel = resolve_law_name(law)
+    refs, total = await rc.search_bundesrecht(
+        titel=titel,
+        abschnitt_von=paragraph,
+        abschnitt_bis=to_paragraph or paragraph,
+        abschnitt_typ="Paragraph",
+        pro_seite="Ten" if to_paragraph else "Ten",
+    )
+
+    if not refs:
+        return f"No results for {law} § {paragraph}."
+
+    parts: list[str] = []
+    for ref in refs:
+        meta = rc._meta_from_ref(ref)
+        html = await rc.fetch_document_html(ref)
+        text = html_to_markdown(html)
+        parts.append(f"### {meta['short_title']} {meta['paragraph']}")
+        parts.append(f"*{meta['kundmachung']}*")
+        parts.append(f"*In force from: {meta['in_force_from']}*")
+        parts.append(f"*Document: {meta['document_id']}*")
+        parts.append("")
+        parts.append(text)
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+@mcp.tool()
+async def get_paragraph_at(
+    law: Annotated[str, "Law name or abbreviation"],
+    paragraph: Annotated[str, "Paragraph number"],
+    date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
+) -> str:
+    """Fetch the historical version of a paragraph as it read on a given date."""
+    titel = resolve_law_name(law)
+    refs, _ = await rc.search_bundesrecht(
+        titel=titel,
+        abschnitt_von=paragraph,
+        abschnitt_bis=paragraph,
+        abschnitt_typ="Paragraph",
+        fassung_vom=date,
+        pro_seite="Ten",
+    )
+
+    if not refs:
+        return f"No version of {law} § {paragraph} found for date {date}."
+
+    ref = refs[0]
+    meta = rc._meta_from_ref(ref)
+    html = await rc.fetch_document_html(ref)
+    text = html_to_markdown(html)
+
+    return "\n".join([
+        f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
+        f"*{meta['kundmachung']}*",
+        f"*In force from: {meta['in_force_from']}*",
+        f"*Document: {meta['document_id']}*",
+        "",
+        text,
+    ])
+
+
+@mcp.tool()
+async def get_statute(
+    name: Annotated[str, "Law name or abbreviation, e.g. ABGB, GmbHG"],
+) -> str:
+    """Fetch the preamble and first page of paragraphs for a statute."""
+    titel = resolve_law_name(name)
+
+    # fetch preamble (§ 0)
+    refs_pre, _ = await rc.search_bundesrecht(
+        titel=titel,
+        abschnitt_von="0",
+        abschnitt_bis="0",
+        abschnitt_typ="Paragraph",
+        pro_seite="Ten",
+    )
+
+    parts: list[str] = []
+
+    if refs_pre:
+        ref = refs_pre[0]
+        meta = rc._meta_from_ref(ref)
+        html = await rc.fetch_document_html(ref)
+        blocks = extract_metadata_blocks(html)
+        parts.append(f"# {blocks.get('Kurztitel', meta['short_title'])}")
+        parts.append("")
+        for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
+            if label in blocks:
+                parts.append(f"**{label}:** {blocks[label]}")
+        if "Änderung" in blocks:
+            amendments = blocks["Änderung"].split("\n")
+            parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}" +
+                         (f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""))
+        parts.append("")
+
+    # fetch first 10 paragraphs
+    refs_body, total = await rc.search_bundesrecht(
+        titel=titel,
+        pro_seite="Ten",
+        seite=1,
+    )
+
+    if refs_body:
+        parts.append(f"*Statute has {total} total sections. Showing first {len(refs_body)}.*\n")
+        tasks = [rc.fetch_document_html(ref) for ref in refs_body]
+        htmls = await asyncio.gather(*tasks)
+        for ref, html in zip(refs_body, htmls):
+            meta = rc._meta_from_ref(ref)
+            if meta["doc_type"] == "Paragraph" and meta["paragraph_number"] != "0":
+                text = html_to_markdown(html)
+                parts.append(f"### {meta['paragraph']}")
+                parts.append(text)
+                parts.append("")
+
+    return "\n".join(parts) if parts else f"Statute '{name}' not found."
+
+
+@mcp.tool()
+async def lookup_bgbl(
+    reference: Annotated[str, "BGBl reference, e.g. 'BGBl I Nr. 50/2023' or '50/2023'"],
+) -> str:
+    """Look up an authentic Bundesgesetzblatt entry and return its title and amended laws."""
+    # parse number from reference like "BGBl I Nr. 50/2023" or "50/2023"
+    import re
+    m = re.search(r"(\d+/\d+)", reference)
+    if not m:
+        return f"Could not parse BGBl number from '{reference}'. Use format like '50/2023'."
+
+    bgbl_num = m.group(1)
+    refs, total = await rc.search_bgbl_auth(bgbl_nummer=bgbl_num)
+
+    if not refs:
+        return f"BGBl Nr. {bgbl_num} not found. Note: BgblAuth only covers entries from 2004 onwards."
+
+    ref = refs[0]
+    meta_raw = ref.get("Data", {}).get("Metadaten", {})
+    bundesrecht = meta_raw.get("Bundesrecht", {})
+    technisch = meta_raw.get("Technisch", {})
+    allgemein = meta_raw.get("Allgemein", {})
+
+    html = await rc.fetch_document_html(ref)
+    blocks = extract_metadata_blocks(html)
+
+    lines = [
+        f"## BGBl {bgbl_num}",
+        f"**ID:** {technisch.get('ID', '')}",
+        f"**URL:** {allgemein.get('DokumentUrl', '')}",
+        f"**Titel:** {bundesrecht.get('Titel', '')}",
+        "",
+    ]
+
+    for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum"):
+        if label in blocks:
+            lines.append(f"**{label}:** {blocks[label]}")
+
+    if "Text" in blocks:
+        lines.append(f"\n### Content\n{blocks['Text'][:2000]}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_amendment_timeline(
+    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB"],
+) -> str:
+    """Return an ordered list of every BGBl amendment that touched a statute."""
+    titel = resolve_law_name(law)
+
+    refs, _ = await rc.search_bundesrecht(
+        titel=titel,
+        abschnitt_von="0",
+        abschnitt_bis="0",
+        abschnitt_typ="Paragraph",
+        pro_seite="Ten",
+    )
+
+    if not refs:
+        return f"Statute '{law}' not found."
+
+    ref = refs[0]
+    html = await rc.fetch_document_html(ref)
+    blocks = extract_metadata_blocks(html)
+
+    short_title = blocks.get("Kurztitel", law)
+    amendments_raw = blocks.get("Änderung", "")
+
+    if not amendments_raw:
+        return f"No amendment list found for {law}."
+
+    amendments = [a.strip() for a in amendments_raw.split("\n") if a.strip()]
+    lines = [f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
+    for i, a in enumerate(amendments, 1):
+        lines.append(f"{i}. {a}")
+
+    return "\n".join(lines)
+
+
+def main():
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()

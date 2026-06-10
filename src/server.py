@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 
 from . import ris_client as rc
-from .aliases import resolve_law_name
 from .content import html_to_markdown, extract_metadata_blocks
 
 mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
@@ -19,8 +19,7 @@ async def search_law(
     law: Annotated[str, "Optional law name or abbreviation to scope the search (e.g. ABGB, StGB)"] = "",
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute."""
-    titel = resolve_law_name(law) if law else ""
-    refs, total = await rc.search_bundesrecht(suchworte=query, titel=titel, pro_seite="Ten")
+    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Ten")
 
     if not refs:
         return "No results found."
@@ -44,13 +43,12 @@ async def get_paragraph(
     to_paragraph: Annotated[str, "End of range (optional), e.g. 1300"] = "",
 ) -> str:
     """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
-    titel = resolve_law_name(law)
-    refs, total = await rc.search_bundesrecht(
-        titel=titel,
+    refs, _ = await rc.search_bundesrecht(
+        titel=law.strip(),
         abschnitt_von=paragraph,
         abschnitt_bis=to_paragraph or paragraph,
         abschnitt_typ="Paragraph",
-        pro_seite="Ten" if to_paragraph else "Ten",
+        pro_seite="Fifty" if to_paragraph else "Ten",
     )
 
     if not refs:
@@ -79,9 +77,8 @@ async def get_paragraph_at(
     date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
 ) -> str:
     """Fetch the historical version of a paragraph as it read on a given date."""
-    titel = resolve_law_name(law)
     refs, _ = await rc.search_bundesrecht(
-        titel=titel,
+        titel=law.strip(),
         abschnitt_von=paragraph,
         abschnitt_bis=paragraph,
         abschnitt_typ="Paragraph",
@@ -112,9 +109,8 @@ async def get_statute(
     name: Annotated[str, "Law name or abbreviation, e.g. ABGB, GmbHG"],
 ) -> str:
     """Fetch the preamble and first page of paragraphs for a statute."""
-    titel = resolve_law_name(name)
+    titel = name.strip()
 
-    # fetch preamble (§ 0)
     refs_pre, _ = await rc.search_bundesrecht(
         titel=titel,
         abschnitt_von="0",
@@ -126,10 +122,10 @@ async def get_statute(
     parts: list[str] = []
 
     if refs_pre:
-        ref = refs_pre[0]
-        meta = rc._meta_from_ref(ref)
+        ref = rc.best_law_match(refs_pre, titel)
         html = await rc.fetch_document_html(ref)
         blocks = extract_metadata_blocks(html)
+        meta = rc._meta_from_ref(ref)
         parts.append(f"# {blocks.get('Kurztitel', meta['short_title'])}")
         parts.append("")
         for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
@@ -137,11 +133,10 @@ async def get_statute(
                 parts.append(f"**{label}:** {blocks[label]}")
         if "Änderung" in blocks:
             amendments = blocks["Änderung"].split("\n")
-            parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}" +
-                         (f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""))
+            suffix = f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""
+            parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
         parts.append("")
 
-    # fetch first 10 paragraphs
     refs_body, total = await rc.search_bundesrecht(
         titel=titel,
         pro_seite="Ten",
@@ -150,8 +145,7 @@ async def get_statute(
 
     if refs_body:
         parts.append(f"*Statute has {total} total sections. Showing first {len(refs_body)}.*\n")
-        tasks = [rc.fetch_document_html(ref) for ref in refs_body]
-        htmls = await asyncio.gather(*tasks)
+        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs_body])
         for ref, html in zip(refs_body, htmls):
             meta = rc._meta_from_ref(ref)
             if meta["doc_type"] == "Paragraph" and meta["paragraph_number"] != "0":
@@ -168,14 +162,12 @@ async def lookup_bgbl(
     reference: Annotated[str, "BGBl reference, e.g. 'BGBl I Nr. 50/2023' or '50/2023'"],
 ) -> str:
     """Look up an authentic Bundesgesetzblatt entry and return its title and amended laws."""
-    # parse number from reference like "BGBl I Nr. 50/2023" or "50/2023"
-    import re
     m = re.search(r"(\d+/\d+)", reference)
     if not m:
         return f"Could not parse BGBl number from '{reference}'. Use format like '50/2023'."
 
     bgbl_num = m.group(1)
-    refs, total = await rc.search_bgbl_auth(bgbl_nummer=bgbl_num)
+    refs, _ = await rc.search_bgbl_auth(bgbl_nummer=bgbl_num)
 
     if not refs:
         return f"BGBl Nr. {bgbl_num} not found. Note: BgblAuth only covers entries from 2004 onwards."
@@ -212,7 +204,7 @@ async def get_amendment_timeline(
     law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB"],
 ) -> str:
     """Return an ordered list of every BGBl amendment that touched a statute."""
-    titel = resolve_law_name(law)
+    titel = law.strip()
 
     refs, _ = await rc.search_bundesrecht(
         titel=titel,
@@ -225,7 +217,7 @@ async def get_amendment_timeline(
     if not refs:
         return f"Statute '{law}' not found."
 
-    ref = refs[0]
+    ref = rc.best_law_match(refs, titel)
     html = await rc.fetch_document_html(ref)
     blocks = extract_metadata_blocks(html)
 

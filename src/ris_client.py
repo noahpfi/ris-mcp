@@ -184,6 +184,22 @@ async def search_bgbl_auth(
     return refs, total
 
 
+def best_law_match(refs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
+    """Pick the ref whose abbreviation or short title best matches query."""
+    if not refs:
+        return None
+    q = query.strip().upper()
+    for ref in refs:
+        m = _meta_from_ref(ref)
+        if m["abbreviation"].upper() == q:
+            return ref
+    for ref in refs:
+        m = _meta_from_ref(ref)
+        if m["short_title"].upper() == q:
+            return ref
+    return refs[0]
+
+
 async def fetch_document_html(ref: dict[str, Any]) -> str:
     url = _html_url_from_ref(ref)
     if not url:

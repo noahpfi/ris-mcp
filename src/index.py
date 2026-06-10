@@ -116,7 +116,7 @@ async def crawl(pages: int = 0, delay: float = 1.0, resume: bool = True) -> int:
         if not refs:
             break
 
-        htmls = await _fetch_batch(refs, batch_size=5, delay=1.0)
+        htmls = await _fetch_batch(refs, batch_size=3, delay=2.0)
 
         with _conn() as conn:
             for ref, html in zip(refs, htmls):

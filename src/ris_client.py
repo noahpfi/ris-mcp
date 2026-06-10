@@ -67,7 +67,7 @@ async def _get_html(url: str) -> str:
             resp.raise_for_status()
             _cache[key] = resp.text
             return resp.text
-        except httpx.TimeoutException:
+        except httpx.TransportError:
             if attempt == 4:
                 raise
             await asyncio.sleep(2 ** attempt)

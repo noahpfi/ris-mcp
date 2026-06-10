@@ -25,6 +25,7 @@
 .DS_Store
 *.pem
 /ris-examples
+/website/
 
 # debug
 npm-debug.log*

@@ -33,10 +33,10 @@ def html_to_markdown(html: str) -> str:
 def _walk_block(node, lines: list[str]) -> None:
     tag = node.tag if node.tag else ""
 
-    if tag in ("h1", "h2", "h3"):
+    if tag in ("h2", "h3"):
         text = node.text(strip=True)
-        if text and text != "Text":
-            prefix = "#" * (int(tag[1]) + 1)
+        if text:
+            prefix = "##" if tag == "h2" else "###"
             lines.append(f"{prefix} {text}")
         return
 
@@ -44,10 +44,16 @@ def _walk_block(node, lines: list[str]) -> None:
         lines.append(_node_text(node))
         return
 
-    for child in node.iter():
-        if child == node:
-            continue
+    if tag == "p":
+        t = _node_text(node)
+        if t:
+            lines.append(t)
+        return
+
+    child = node.child
+    while child:
         _walk_block(child, lines)
+        child = child.next
 
 
 def _node_text(node) -> str:

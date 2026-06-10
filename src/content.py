@@ -34,7 +34,7 @@ def _walk_block(node, lines: list[str]) -> None:
     tag = node.tag if node.tag else ""
 
     if tag in ("h2", "h3"):
-        text = node.text(strip=True)
+        text = _clean(node.text(separator=" "))
         if text:
             prefix = "##" if tag == "h2" else "###"
             lines.append(f"{prefix} {text}")

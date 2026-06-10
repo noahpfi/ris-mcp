@@ -19,7 +19,11 @@ async def search_law(
     query: Annotated[str, "Full-text search terms"],
     law: Annotated[str, "Optional law name or abbreviation to scope the search (e.g. ABGB, StGB)"] = "",
 ) -> str:
-    """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute."""
+    """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
+
+    Note: the RIS API uses literal matching without German stemming — prefer get_law_outline
+    to discover the relevant paragraph when you know the statute.
+    """
     refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Ten")
 
     if not refs:

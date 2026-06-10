@@ -28,7 +28,8 @@ async def search_law(
     lines = [f"Found {total} result(s). Showing first {len(refs)}.\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
-        lines.append(f"**{meta['short_title']}** {meta['paragraph']}")
+        repeal_note = f"  ⚠ REPEALED {meta['repealed']}" if meta["repealed"] else ""
+        lines.append(f"**{meta['short_title']}** {meta['paragraph']}{repeal_note}")
         lines.append(f"  Document: {meta['document_id']}")
         lines.append(f"  In force: {meta['in_force_from']}")
         lines.append(f"  URL: {meta['doc_url']}")
@@ -55,14 +56,18 @@ async def get_paragraph(
     if not refs:
         return f"No results for {law} § {paragraph}."
 
+    live = [r for r in refs if not rc._meta_from_ref(r)["repealed"]]
+    refs = live if live else refs
+
     parts: list[str] = []
     for ref in refs:
         meta = rc._meta_from_ref(ref)
         html = await rc.fetch_document_html(ref)
         text = html_to_markdown(html)
+        repeal_note = f"  ⚠ repealed: {meta['repealed']}" if meta["repealed"] else ""
         parts.append(f"### {meta['short_title']} {meta['paragraph']}")
         parts.append(f"*{meta['kundmachung']}*")
-        parts.append(f"*In force from: {meta['in_force_from']}*")
+        parts.append(f"*In force from: {meta['in_force_from']}{repeal_note}*")
         parts.append(f"*Document: {meta['document_id']}*")
         parts.append("")
         parts.append(text)

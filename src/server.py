@@ -26,15 +26,33 @@ async def search_law(
     Prefer get_law_outline to browse a known statute's table of contents.
     Results are sorted by most recently amended first.
     """
-    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Twenty")
+    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Fifty")
 
     if not refs:
         return "No results found."
 
-    refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["geaendert"], reverse=True)
-
-    lines = [f"Found {total} result(s). Showing first {len(refs)}, newest first.\n"]
+    # deduplicate: per (law, paragraph) keep live version; if all repealed keep newest by in_force_from
+    seen: dict[tuple[str, str], dict] = {}
     for ref in refs:
+        meta = rc._meta_from_ref(ref)
+        key = (meta["short_title"], meta["paragraph_number"])
+        prev = seen.get(key)
+        if prev is None:
+            seen[key] = ref
+        else:
+            pm = rc._meta_from_ref(prev)
+            # prefer live over repealed; if same liveness prefer newer in_force_from
+            prev_live = not pm["repealed"]
+            curr_live = not meta["repealed"]
+            if curr_live and not prev_live:
+                seen[key] = ref
+            elif curr_live == prev_live and meta["in_force_from"] > pm["in_force_from"]:
+                seen[key] = ref
+
+    deduped = sorted(seen.values(), key=lambda r: rc._meta_from_ref(r)["geaendert"], reverse=True)
+
+    lines = [f"Found {total} result(s) ({len(deduped)} unique laws/paragraphs), newest first.\n"]
+    for ref in deduped:
         meta = rc._meta_from_ref(ref)
         repeal_note = f"  ⚠ REPEALED {meta['repealed']}" if meta["repealed"] else ""
         lines.append(f"**{meta['short_title']}** {meta['paragraph']}{repeal_note}")

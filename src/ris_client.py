@@ -57,19 +57,20 @@ async def _get_html(url: str) -> str:
     if key in _cache:
         return _cache[key]
 
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             resp = await _client().get(url)
-            if resp.status_code == 429:
-                await asyncio.sleep(2 ** attempt)
+            if resp.status_code in (429, 503):
+                wait = 2 ** attempt
+                await asyncio.sleep(wait)
                 continue
             resp.raise_for_status()
             _cache[key] = resp.text
             return resp.text
         except httpx.TimeoutException:
-            if attempt == 2:
+            if attempt == 4:
                 raise
-            await asyncio.sleep(1)
+            await asyncio.sleep(2 ** attempt)
 
     raise RuntimeError(f"Could not fetch content from {url}")
 

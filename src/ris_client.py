@@ -5,6 +5,7 @@ Base URL: https://data.bka.gv.at/ris/api/v2.6/
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import httpx
@@ -72,7 +73,8 @@ async def _get_html(url: str) -> str:
                 raise
             await asyncio.sleep(2 ** attempt)
 
-    raise RuntimeError(f"Could not fetch content from {url}")
+    logging.getLogger(__name__).warning("Skipping %s after retries", url)
+    return ""
 
 
 def _extract_docs(data: dict[str, Any]) -> list[dict[str, Any]]:

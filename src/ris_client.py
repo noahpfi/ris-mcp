@@ -115,6 +115,7 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
     return {
         "document_id": technisch.get("ID", ""),
         "doc_url": allgemein.get("DokumentUrl", ""),
+        "geaendert": allgemein.get("Geaendert", ""),
         "short_title": bundesrecht.get("Kurztitel", ""),
         "abbreviation": brkons.get("Abkuerzung", bundesrecht.get("Abkuerzung", "")),
         "paragraph": brkons.get("ArtikelParagraphAnlage", ""),
@@ -191,14 +192,22 @@ async def search_bgbl_auth(
 
 def best_law_match(refs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     """Pick the ref whose abbreviation or short title best matches query, preferring live laws."""
+    import re as _re
     if not refs:
         return None
     live = [r for r in refs if not _meta_from_ref(r)["repealed"]]
     pool = live if live else refs
     q = query.strip().upper()
+    # strip trailing year for fuzzy matching, e.g. "UStG" matches "UStG 1994"
+    q_base = _re.sub(r'\s*\d{4}\s*$', '', q).strip()
     for ref in pool:
         m = _meta_from_ref(ref)
         if m["abbreviation"].upper() == q:
+            return ref
+    for ref in pool:
+        m = _meta_from_ref(ref)
+        abbr_base = _re.sub(r'\s*\d{4}\s*$', '', m["abbreviation"]).upper().strip()
+        if abbr_base == q_base and q_base:
             return ref
     for ref in pool:
         m = _meta_from_ref(ref)

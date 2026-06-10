@@ -21,21 +21,25 @@ async def search_law(
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
 
-    Note: the RIS API uses literal matching without German stemming — prefer get_law_outline
-    to discover the relevant paragraph when you know the statute.
+    Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
+    text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
+    Prefer get_law_outline to browse a known statute's table of contents.
+    Results are sorted by most recently amended first.
     """
-    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Ten")
+    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Twenty")
 
     if not refs:
         return "No results found."
 
-    lines = [f"Found {total} result(s). Showing first {len(refs)}.\n"]
+    refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["geaendert"], reverse=True)
+
+    lines = [f"Found {total} result(s). Showing first {len(refs)}, newest first.\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
         repeal_note = f"  ⚠ REPEALED {meta['repealed']}" if meta["repealed"] else ""
         lines.append(f"**{meta['short_title']}** {meta['paragraph']}{repeal_note}")
         lines.append(f"  Document: {meta['document_id']}")
-        lines.append(f"  In force: {meta['in_force_from']}")
+        lines.append(f"  Last amended: {meta['geaendert']}  In force: {meta['in_force_from']}")
         lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 

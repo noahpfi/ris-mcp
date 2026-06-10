@@ -71,22 +71,44 @@ def parse_law_outline(html: str) -> str:
     lines: list[str] = []
     current_section: str | None = None
     last_printed_section: str | None = None
+    seen_entries: set[str] = set()
 
     for block in tree.css("div.contentBlock"):
         g1 = block.css_first("h4.UeberschrG1, h4.UeberschrG1-AfterG2")
         if g1:
             current_section = _clean(g1.text(separator=" "))
 
-        heading = block.css_first("h4.UeberschrPara")
         raw = block.text(separator=" ")
-        m = re.search(r"§\s*(\d+)", raw)
-        if heading and m:
+        heading = block.css_first("h4.UeberschrPara")
+        m_par = re.search(r"§\s*(\d+)", raw)
+        if heading and m_par:
+            entry = f"§{m_par.group(1)}"
+            if entry in seen_entries:
+                continue
+            seen_entries.add(entry)
             if current_section != last_printed_section:
                 if lines:
                     lines.append("")
                 lines.append(f"**{current_section or ''}**")
                 last_printed_section = current_section
-            lines.append(f"§ {int(m.group(1)):>4}  {heading.text(strip=True)}")
+            lines.append(f"§ {int(m_par.group(1)):>4}  {heading.text(strip=True)}")
+            continue
+
+        gld = block.css_first("h5.GldSymbol")
+        m_art = re.search(r"Artikel\s+(\d+)", raw) if gld else None
+        if gld and m_art:
+            entry = f"Art{m_art.group(1)}"
+            if entry in seen_entries:
+                continue
+            seen_entries.add(entry)
+            if current_section != last_printed_section:
+                if lines:
+                    lines.append("")
+                lines.append(f"**{current_section or ''}**")
+                last_printed_section = current_section
+            sub = block.css_first("h4.UeberschrArt")
+            title = sub.text(strip=True) if sub else ""
+            lines.append(f"Art. {int(m_art.group(1)):>3}  {title}")
 
     return "\n".join(lines) if lines else ""
 

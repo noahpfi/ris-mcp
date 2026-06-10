@@ -54,7 +54,7 @@ async def get_paragraph(
         abschnitt_von=paragraph,
         abschnitt_bis=to_paragraph or paragraph,
         abschnitt_typ="Paragraph",
-        pro_seite="Fifty" if to_paragraph else "Ten",
+        pro_seite="Fifty",
     )
 
     if not refs:
@@ -126,7 +126,7 @@ async def get_statute(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
-        pro_seite="Ten",
+        pro_seite="Fifty",
     )
 
     parts: list[str] = []
@@ -154,7 +154,13 @@ async def get_statute(
     )
 
     if refs_body:
-        parts.append(f"*Statute has {total} total sections. Showing first {len(refs_body)}.*\n")
+        live_body = [r for r in refs_body if not rc._meta_from_ref(r)["repealed"]]
+        refs_body = live_body if live_body else refs_body
+        seen_paras: set[str] = set()
+        refs_body = [r for r in refs_body
+                     if rc._meta_from_ref(r)["paragraph_number"] not in seen_paras
+                     and not seen_paras.add(rc._meta_from_ref(r)["paragraph_number"])]  # type: ignore[func-returns-value]
+        parts.append(f"*Statute has {total} total sections. Showing first {len(refs_body)} live paragraphs.*\n")
         htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs_body])
         for ref, html in zip(refs_body, htmls):
             meta = rc._meta_from_ref(ref)
@@ -181,7 +187,7 @@ async def get_law_outline(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
-        pro_seite="Ten",
+        pro_seite="Fifty",
     )
     if not refs:
         refs, _ = await rc.search_bundesrecht(titel=titel, pro_seite="Ten")
@@ -256,7 +262,7 @@ async def get_amendment_timeline(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
-        pro_seite="Ten",
+        pro_seite="Fifty",
     )
 
     if not refs:
@@ -297,7 +303,9 @@ async def who_mentions(
             "This crawls ~250k documents and takes 30-90 minutes."
         )
 
-    results = fts_index.search_fts(reference, limit=limit)
+    fts_query = reference.replace("§", "").replace("Art.", "").strip()
+    fts_query = '"' + fts_query.replace('"', '""') + '"'
+    results = fts_index.search_fts(fts_query, limit=limit)
     if not results:
         return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
 

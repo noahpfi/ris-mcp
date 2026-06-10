@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import ris_client as rc
 from .content import html_to_markdown, extract_metadata_blocks
+from . import index as fts_index
 
 mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
 
@@ -231,6 +232,38 @@ async def get_amendment_timeline(
     lines = [f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
     for i, a in enumerate(amendments, 1):
         lines.append(f"{i}. {a}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def who_mentions(
+    reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
+    limit: Annotated[int, "Max results to return (default 20)"] = 20,
+) -> str:
+    """Full-text search the local RIS index for laws that mention a given citation.
+
+    Requires the local index to be built first (run index.py crawl).
+    """
+    count = fts_index.doc_count()
+    if count == 0:
+        return (
+            "Local index is empty. Build it first by running:\n"
+            "  python3 -m src.index\n"
+            "This crawls ~250k documents and takes 30-90 minutes."
+        )
+
+    results = fts_index.search_fts(reference, limit=limit)
+    if not results:
+        return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
+
+    lines = [f"Documents mentioning '{reference}' ({len(results)} results from {count} indexed):\n"]
+    for r in results:
+        lines.append(f"**{r['short_title']}** {r['paragraph']}")
+        lines.append(f"  Document: {r['document_id']}")
+        lines.append(f"  In force: {r['in_force_from']}")
+        lines.append(f"  URL: {r['doc_url']}")
+        lines.append("")
 
     return "\n".join(lines)
 

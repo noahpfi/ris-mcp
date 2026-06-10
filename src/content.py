@@ -65,6 +65,32 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+def parse_law_outline(html: str) -> str:
+    """Parse paragraph TOC from a GesamteRechtsvorschrift page."""
+    tree = HTMLParser(html)
+    lines: list[str] = []
+    current_section: str | None = None
+    last_printed_section: str | None = None
+
+    for block in tree.css("div.contentBlock"):
+        g1 = block.css_first("h4.UeberschrG1, h4.UeberschrG1-AfterG2")
+        if g1:
+            current_section = g1.text(strip=True)
+
+        heading = block.css_first("h4.UeberschrPara")
+        raw = block.text(separator=" ")
+        m = re.search(r"§\s*(\d+)", raw)
+        if heading and m:
+            if current_section != last_printed_section:
+                if lines:
+                    lines.append("")
+                lines.append(f"**{current_section or ''}**")
+                last_printed_section = current_section
+            lines.append(f"§ {int(m.group(1)):>4}  {heading.text(strip=True)}")
+
+    return "\n".join(lines) if lines else ""
+
+
 def extract_amendment_list(html: str) -> list[str]:
     """Pull the Änderung list from a preamble (§ 0) document."""
     tree = HTMLParser(html)

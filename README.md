@@ -47,7 +47,7 @@ Add to `claude_desktop_config.json`:
 ## Build local index (for `who_mentions`)
 
 ```bash
-python3 -m src.index        # crawl all ~250k docs (30-90 min)
+python3 -m src.index        # crawl all ~250k docs (30-90+ min)
 python3 -m src.index 10     # crawl first 10 pages only (for testing)
 ```
 

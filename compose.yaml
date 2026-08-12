@@ -2,9 +2,8 @@ name: ris-mcp
 
 # hosted = 7 RIS-API tools + landing page, one origin
 # who_mentions needs ~600MB FTS index + crawler -> README Self-host with cross-references
-# server alone here, internet needs overlay
-#   cloudflared running -> -f compose.yaml -f compose.external-network.yaml
-#   no tunnel -> -f compose.yaml -f compose.tunnel.yaml
+# joins cloudflared network as http://ris-mcp:8000, no published port, network name via
+#   docker inspect <cloudflared-container> --format '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}}{{"\n"}}{{end}}'
 
 services:
   ris-mcp:
@@ -37,3 +36,11 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+    networks:
+      - default
+      - tunnel
+
+networks:
+  tunnel:
+    external: true
+    name: ${CF_NETWORK:?set CF_NETWORK to the docker network your cloudflared runs on}

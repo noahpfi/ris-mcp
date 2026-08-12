@@ -2,16 +2,52 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from . import config
+from . import http_app
 from . import ris_client as rc
 from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
 from . import index as fts_index
 
-mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
+
+def _transport_security() -> TransportSecuritySettings | None:
+    """Host/Origin allowlist for the MCP endpoint.
+
+    FastMCP only auto-enables this when bound to loopback, so binding 0.0.0.0
+    in a container would otherwise silently turn the check off.
+    """
+    if not config.PUBLIC_HOSTS:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=config.PUBLIC_HOSTS,
+        allowed_origins=[f"https://{host}" for host in config.PUBLIC_HOSTS],
+    )
+
+
+mcp = FastMCP(
+    "ris-mcp",
+    dependencies=["httpx", "cachetools", "selectolax"],
+    host=config.HOST,
+    port=config.PORT,
+    log_level=config.LOG_LEVEL,
+    # Every tool is one request in, one response out. Stateless drops session
+    # affinity and the long-lived stream, so the tunnel in front stays dumb,
+    # and json_response keeps responses off text/event-stream entirely — which
+    # is what Cloudflare's proxy buffering is happiest with.
+    stateless_http=True,
+    json_response=True,
+    transport_security=_transport_security(),
+)
 
 
 @mcp.tool()
@@ -280,24 +316,34 @@ async def get_amendment_timeline(
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def who_mentions(
     reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
-    limit: Annotated[int, "Max results to return (default 20)"] = 20,
+    limit: Annotated[int, "Max results to return (1-100, default 20)"] = 20,
 ) -> str:
     """Full-text search the local RIS index for laws that mention a given citation.
 
-    Requires the local index to be built first (run index.py crawl).
+    Reverse citation lookup: finds provisions that cite the one you name.
+    Backed by a locally built FTS index, so it is only registered where that
+    index exists.
     """
-    count = fts_index.doc_count()
+    # A negative LIMIT means "unbounded" to SQLite, so an unclamped value here
+    # returns the whole match set to a caller who asked for -1.
+    limit = max(1, min(limit, 100))
+
+    # SQLite is blocking and an FTS5 scan over the full index is not fast.
+    # Left on the event loop it stalls every other in-flight request.
+    count = await asyncio.to_thread(fts_index.doc_count)
     if count == 0:
         return (
             "Local index is empty. Build it first by running:\n"
             "  python3 -m src.index\n"
-            "This crawls ~250k documents and takes 30-90 minutes."
+            "That crawls ~441k documents at roughly 9/s, so plan for an overnight run."
         )
 
-    results = fts_index.search_fts(reference, limit=limit)
+    if not fts_index.fts_query(reference):
+        return f"'{reference}' holds no searchable term."
+
+    results = await asyncio.to_thread(fts_index.search_fts, reference, limit)
     if not results:
         return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
 
@@ -312,8 +358,48 @@ async def who_mentions(
     return "\n".join(lines)
 
 
-def main():
-    mcp.run()
+# Registered last and conditionally: the hosted deployment runs index-free, and
+# a tool that is present but always answers "not available here" is worse than
+# one the client never sees.
+if config.index_enabled():
+    mcp.add_tool(who_mentions)
+
+
+@mcp.custom_route(http_app.HEALTH_PATH, methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Liveness probe, plus which tool surface this instance is serving.
+
+    An empty or stale index is reported, not failed: the other seven tools hit
+    the RIS API directly and work without it.
+    """
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "index": config.index_enabled(),
+        "tools": len(await mcp.list_tools()),
+    }
+    if config.index_enabled():
+        payload["docs"] = await asyncio.to_thread(fts_index.doc_count)
+        payload["last_crawl"] = await asyncio.to_thread(fts_index.last_crawl)
+    return JSONResponse(payload)
+
+
+async def _serve_stdio() -> None:
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await rc.close()
+
+
+def main() -> None:
+    config.validate_runtime()
+    logging.basicConfig(
+        level=config.LOG_LEVEL,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.TRANSPORT == "streamable-http":
+        anyio.run(http_app.serve, mcp)
+    else:
+        anyio.run(_serve_stdio)
 
 
 if __name__ == "__main__":

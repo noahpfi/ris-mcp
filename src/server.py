@@ -1,17 +1,46 @@
-"""RIS MCP server — Austrian federal law for LLMs."""
+"""RIS MCP server, Austrian federal law for LLMs"""
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from . import config
+from . import http_app
 from . import ris_client as rc
 from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
 from . import index as fts_index
 
-mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
+
+def _transport_security() -> TransportSecuritySettings | None:
+    """Host/Origin allowlist; FastMCP enables it only on loopback -> binding 0.0.0.0 silently drops check"""
+    if not config.PUBLIC_HOSTS:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=config.PUBLIC_HOSTS,
+        allowed_origins=[f"https://{host}" for host in config.PUBLIC_HOSTS],
+    )
+
+
+mcp = FastMCP(
+    "ris-mcp",
+    dependencies=["httpx", "cachetools", "selectolax"],
+    host=config.HOST,
+    port=config.PORT,
+    log_level=config.LOG_LEVEL,
+    # stateless -> dumb tunnel, no affinity; json_response keeps off SSE, suits Cloudflare proxy buffering
+    stateless_http=True,
+    json_response=True,
+    transport_security=_transport_security(),
+)
 
 
 @mcp.tool()
@@ -280,24 +309,32 @@ async def get_amendment_timeline(
     return "\n".join(lines)
 
 
-@mcp.tool()
 async def who_mentions(
     reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
-    limit: Annotated[int, "Max results to return (default 20)"] = 20,
+    limit: Annotated[int, "Max results to return (1-100, default 20)"] = 20,
 ) -> str:
     """Full-text search the local RIS index for laws that mention a given citation.
 
-    Requires the local index to be built first (run index.py crawl).
+    Reverse citation lookup: finds provisions that cite the one you name.
+    Backed by a locally built FTS index, so it is only registered where that
+    index exists.
     """
-    count = fts_index.doc_count()
+    # negative LIMIT = unbounded in SQLite -> clamp, else -1 returns whole match set
+    limit = max(1, min(limit, 100))
+
+    # SQLite blocks, FTS5 full scan slow -> off event loop or every request stalls
+    count = await asyncio.to_thread(fts_index.doc_count)
     if count == 0:
         return (
             "Local index is empty. Build it first by running:\n"
             "  python3 -m src.index\n"
-            "This crawls ~250k documents and takes 30-90 minutes."
+            "That crawls ~441k documents at roughly 9/s, so plan for an overnight run."
         )
 
-    results = fts_index.search_fts(reference, limit=limit)
+    if not fts_index.fts_query(reference):
+        return f"'{reference}' holds no searchable term."
+
+    results = await asyncio.to_thread(fts_index.search_fts, reference, limit)
     if not results:
         return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
 
@@ -312,8 +349,46 @@ async def who_mentions(
     return "\n".join(lines)
 
 
-def main():
-    mcp.run()
+# registered last, conditionally; hosted runs index-free, hidden tool beats always-unavailable one
+if config.index_enabled():
+    mcp.add_tool(who_mentions)
+
+
+@mcp.custom_route(http_app.HEALTH_PATH, methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Liveness probe, plus which tool surface this instance is serving.
+
+    An empty or stale index is reported, not failed: the other seven tools hit
+    the RIS API directly and work without it.
+    """
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "index": config.index_enabled(),
+        "tools": len(await mcp.list_tools()),
+    }
+    if config.index_enabled():
+        payload["docs"] = await asyncio.to_thread(fts_index.doc_count)
+        payload["last_crawl"] = await asyncio.to_thread(fts_index.last_crawl)
+    return JSONResponse(payload)
+
+
+async def _serve_stdio() -> None:
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await rc.close()
+
+
+def main() -> None:
+    config.validate_runtime()
+    logging.basicConfig(
+        level=config.LOG_LEVEL,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.TRANSPORT == "streamable-http":
+        anyio.run(http_app.serve, mcp)
+    else:
+        anyio.run(_serve_stdio)
 
 
 if __name__ == "__main__":

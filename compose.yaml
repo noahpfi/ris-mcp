@@ -1,0 +1,44 @@
+name: ris-mcp
+
+# Hosted deployment: the seven RIS-API tools plus the landing page, one origin.
+# who_mentions needs a ~600MB FTS index and a periodic crawler, so it is not
+# part of this stack — see "Self-host with cross-references" in the README.
+#
+# This file brings up the server alone. Reaching it from the internet needs one
+# of the overlays:
+#   already running cloudflared:  -f compose.yaml -f compose.external-network.yaml
+#   no tunnel yet:                -f compose.yaml -f compose.tunnel.yaml
+
+services:
+  ris-mcp:
+    build: .
+    image: ris-mcp:latest
+    restart: unless-stopped
+    environment:
+      RIS_TRANSPORT: streamable-http
+      RIS_HOST: 0.0.0.0
+      RIS_PORT: "8000"
+      RIS_INDEX: "off"
+      RIS_PUBLIC_HOSTS: ${RIS_PUBLIC_HOSTS:?set RIS_PUBLIC_HOSTS in .env}
+      RIS_MAX_UPSTREAM: ${RIS_MAX_UPSTREAM:-4}
+      RIS_RATE_LIMIT: ${RIS_RATE_LIMIT:-60}
+      RIS_RATE_WINDOW: ${RIS_RATE_WINDOW:-60}
+      RIS_LOG_LEVEL: ${RIS_LOG_LEVEL:-INFO}
+    # Deliberately no `ports:`. The tunnel is the only route in, which is what
+    # makes the CF-Connecting-IP header the rate limiter reads trustworthy.
+    # No volumes either: this instance holds no state at all.
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

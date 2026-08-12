@@ -1,0 +1,23 @@
+# Overlay for a host with no cloudflared yet: runs the connector alongside.
+#
+#   docker compose -f compose.yaml -f compose.tunnel.yaml up -d --build
+#
+# In the Cloudflare dashboard, route one public hostname to http://ris-mcp:8000.
+# No path rules: the container serves /mcp itself and the landing page elsewhere.
+
+services:
+  cloudflared:
+    # Floating tag on purpose: Cloudflare expires old tunnel clients, so this
+    # image is one of the few worth tracking rather than pinning.
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      ris-mcp:
+        condition: service_healthy

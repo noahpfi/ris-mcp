@@ -1,0 +1,39 @@
+name: ris-mcp
+
+# hosted = 7 RIS-API tools + landing page, one origin
+# who_mentions needs ~600MB FTS index + crawler -> README Self-host with cross-references
+# server alone here, internet needs overlay
+#   cloudflared running -> -f compose.yaml -f compose.external-network.yaml
+#   no tunnel -> -f compose.yaml -f compose.tunnel.yaml
+
+services:
+  ris-mcp:
+    build: .
+    image: ris-mcp:latest
+    restart: unless-stopped
+    environment:
+      RIS_TRANSPORT: streamable-http
+      RIS_HOST: 0.0.0.0
+      RIS_PORT: "8000"
+      RIS_INDEX: "off"
+      RIS_PUBLIC_HOSTS: ${RIS_PUBLIC_HOSTS:?set RIS_PUBLIC_HOSTS in .env}
+      RIS_MAX_UPSTREAM: ${RIS_MAX_UPSTREAM:-4}
+      RIS_RATE_LIMIT: ${RIS_RATE_LIMIT:-60}
+      RIS_RATE_WINDOW: ${RIS_RATE_WINDOW:-60}
+      RIS_LOG_LEVEL: ${RIS_LOG_LEVEL:-INFO}
+    # no ports on purpose, tunnel only route -> CF-Connecting-IP trustworthy; no volumes, stateless
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

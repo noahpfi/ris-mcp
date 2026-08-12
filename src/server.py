@@ -19,6 +19,22 @@ from .content import html_to_markdown, extract_metadata_blocks, parse_law_outlin
 from . import index as fts_index
 
 
+# get_paragraph fans out one upstream fetch per paragraph -> range = amplification lever, capped
+MAX_RANGE = 20
+
+_LEADING_DIGITS = re.compile(r"^\s*(\d+)")
+
+
+def _range_span(start: str, end: str) -> int | None:
+    """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
+    if not end:
+        return None
+    lo, hi = _LEADING_DIGITS.match(start), _LEADING_DIGITS.match(end)
+    if not lo or not hi:
+        return None
+    return int(hi.group(1)) - int(lo.group(1)) + 1
+
+
 def _transport_security() -> TransportSecuritySettings | None:
     """Host/Origin allowlist; FastMCP enables it only on loopback -> binding 0.0.0.0 silently drops check"""
     if not config.PUBLIC_HOSTS:
@@ -75,9 +91,16 @@ async def search_law(
 async def get_paragraph(
     law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
     paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
-    to_paragraph: Annotated[str, "End of range (optional), e.g. 1300"] = "",
+    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
 ) -> str:
     """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
+    span = _range_span(paragraph, to_paragraph)
+    if span is not None and span > MAX_RANGE:
+        return (
+            f"Range §§ {paragraph}–{to_paragraph} covers {span} paragraphs; the limit is "
+            f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
+        )
+
     refs, _ = await rc.search_bundesrecht(
         titel=law.strip(),
         abschnitt_von=paragraph,
@@ -91,7 +114,10 @@ async def get_paragraph(
 
     live = [r for r in refs if not rc._meta_from_ref(r)["repealed"]]
     refs = live if live else refs
+    # API may widen range past span check -> cap again, one call fans out to many fetches
+    refs = refs[:MAX_RANGE]
 
+    # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
     parts: list[str] = []
     for ref in refs:
         meta = rc._meta_from_ref(ref)

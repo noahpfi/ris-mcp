@@ -38,7 +38,7 @@ export default function WhatSection() {
         >
           RIS
         </a>{' '}
-        is the Austrian federal government's legal information system — ~250,000 documents
+        is the Austrian federal government's legal information system — over 440,000 documents
         covering every statute, regulation, and gazette entry. It's public and always current,
         but not exactly AI-friendly to query directly.
       </p>

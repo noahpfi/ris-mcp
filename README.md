@@ -1,36 +1,35 @@
 # ris-mcp
 
-MCP server for Austria's [RIS](https://www.ris.bka.gv.at/) (Rechtsinformationssystem).
-Exposes Austrian federal law (Bundesrecht) to LLMs via the public RIS OGD API v2.6.
+MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](https://www.ris.bka.gv.at/) OGD API v2.6.
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `search_law` | Full-text search across Bundesrecht, newest first, deduplicated by law+paragraph |
-| `get_paragraph` | Fetch a paragraph or range (e.g. §§ 200–210 UGB), live version only |
-| `get_paragraph_at` | Historical version of a paragraph on a given date |
-| `get_statute` | Preamble + first page of live paragraphs for a statute |
-| `get_law_outline` | Full table of contents for a statute, grouped by section |
-| `lookup_bgbl` | Look up a BGBl entry by number (e.g. `50/2023`) |
-| `get_amendment_timeline` | Ordered list of every BGBl that amended a statute |
-| `who_mentions` | Search local FTS index for laws citing a provision (e.g. `§ 879`) |
+| Tool | Purpose | Hosted |
+|---|---|---|
+| `search_law` | Full-text search across Bundesrecht, newest first, deduplicated by law and paragraph | ✓ |
+| `get_paragraph` | Fetch a paragraph or range such as §§ 200–210 UGB, live version only | ✓ |
+| `get_paragraph_at` | Historical version of a paragraph on a given date | ✓ |
+| `get_statute` | Preamble and first page of live paragraphs for a statute | ✓ |
+| `get_law_outline` | Full table of contents for a statute, grouped by section | ✓ |
+| `lookup_bgbl` | Look up a BGBl entry by number, e.g. `50/2023` | ✓ |
+| `get_amendment_timeline` | Every BGBl that amended a statute, in order | ✓ |
+| `who_mentions` | Reverse citation lookup, e.g. which provisions cite `§ 879` | self-host |
 
-## Install
+## Hosted
+
+```bash
+claude mcp add --transport http ris https://ris-mcp.noahpfister.com/mcp
+```
+
+Claude Desktop accepts the same URL as a custom connector.
+
+## Self-host
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Run (MCP Inspector)
-
-```bash
-mcp dev src/server.py
-```
-
-## Claude Desktop
-
-Add to `claude_desktop_config.json`:
+Point your MCP client at the local process:
 
 ```json
 {
@@ -44,15 +43,41 @@ Add to `claude_desktop_config.json`:
 }
 ```
 
-## Build local index (for `who_mentions`)
+`mcp dev src/server.py` runs it under the MCP Inspector.
+
+`who_mentions` searches a local full-text index of about 600MB. It registers automatically once `data/ris.db` exists:
 
 ```bash
-python3 -m src.index        # crawl all ~250k docs (30-90+ min)
-python3 -m src.index 10     # crawl first 10 pages only (for testing)
+python3 -m src.index             # full crawl, ~441k docs at ~9/s, resumable
+python3 -m src.index 10          # first 10 pages only
+python3 -m src.index --fill-gaps # fetch missing docs only
 ```
+
+## Configuration
+
+All variables are optional. Defaults suit a local stdio run.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RIS_TRANSPORT` | `stdio` | `stdio` or `streamable-http` |
+| `RIS_HOST` / `RIS_PORT` | `127.0.0.1` / `8000` | HTTP bind |
+| `RIS_PUBLIC_HOSTS` | — | Comma-separated Host allowlist, required on non-loopback bind |
+| `RIS_INDEX` | `auto` | `auto` registers `who_mentions` when the index exists, `on` requires it, `off` disables it |
+| `RIS_DB_PATH` | `data/ris.db` | FTS index location |
+| `RIS_STATIC_DIR` | — | Built landing page served at `/`, set to `/app/website` in the image |
+| `RIS_MAX_UPSTREAM` | `4` | Concurrent requests to RIS per process |
+| `RIS_RATE_LIMIT` / `RIS_RATE_WINDOW` | `60` / `60` | Per-IP token bucket, `0` disables it |
+| `RIS_LOG_LEVEL` | `INFO` | |
+
+## Tests
+
+```bash
+pytest
+```
+
+Tests run offline against a temporary database.
 
 ## Notes
 
-- API: `https://data.bka.gv.at/ris/api/v2.6/` — public, no auth
-- `Applikation=BrKons` for consolidated federal law, `BgblAuth` for gazette entries (≥2004)
-- Content is HTML fetched per-document; converted to clean markdown
+- API base is `https://data.bka.gv.at/ris/api/v2.6/`, public and unauthenticated. `BrKons` serves consolidated federal law, `BgblAuth` serves gazette entries from 2004 on.
+- `RIS_MAX_UPSTREAM` caps in-flight requests to RIS regardless of inbound load, which keeps a public endpoint from flooding a government API.

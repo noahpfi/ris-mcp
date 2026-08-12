@@ -67,27 +67,31 @@ One container serves both surfaces — the landing page at `/` and the MCP
 endpoint at `/mcp`. The image builds the site itself in a Node stage, so there
 is no separate static host to keep in sync and no way to ship a stale bundle.
 
-Copy `.env.example` to `.env` and set `RIS_PUBLIC_HOSTS`, then pick how the
-tunnel reaches it.
-
-**Already running cloudflared in Docker.** Set `CF_NETWORK` to the network that
-connector is on and join it:
+Copy `.env.example` to `.env`, set `RIS_PUBLIC_HOSTS`, and point `CF_NETWORK` at
+the docker network your cloudflared already runs on:
 
 ```bash
 docker inspect <cloudflared-container> \
   --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}'
-docker compose -f compose.yaml -f compose.external-network.yaml up -d --build
+docker compose up -d --build
 ```
 
-**No tunnel yet.** Set `TUNNEL_TOKEN` and let the stack run its own connector:
+Then add **one** public hostname in the Cloudflare dashboard routing your domain
+to `http://ris-mcp:8000`. No path rules: the container routes `/mcp` itself and
+serves the page for everything else.
 
-```bash
-docker compose -f compose.yaml -f compose.tunnel.yaml up -d --build
+No tunnel yet? Add a connector to the same stack with a `compose.override.yaml`:
+
+```yaml
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?}
+    depends_on: {ris-mcp: {condition: service_healthy}}
 ```
-
-Either way, add **one** public hostname in the Cloudflare dashboard routing your
-domain to `http://ris-mcp:8000`. No path rules: the container routes `/mcp`
-itself and serves the page for everything else.
 
 The container port is deliberately not published — the tunnel is the only route
 in, which is what makes the `CF-Connecting-IP` header the rate limiter reads

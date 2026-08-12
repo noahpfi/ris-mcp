@@ -4,10 +4,11 @@ name: ris-mcp
 # who_mentions needs a ~600MB FTS index and a periodic crawler, so it is not
 # part of this stack — see "Self-host with cross-references" in the README.
 #
-# This file brings up the server alone. Reaching it from the internet needs one
-# of the overlays:
-#   already running cloudflared:  -f compose.yaml -f compose.external-network.yaml
-#   no tunnel yet:                -f compose.yaml -f compose.tunnel.yaml
+# Joins the docker network your cloudflared already runs on, so the connector
+# reaches it as http://ris-mcp:8000 with no published port. Find the network:
+#   docker inspect <cloudflared-container> \
+#     --format '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}}{{"\n"}}{{end}}'
+# No tunnel yet? README has the six lines that add a cloudflared service here.
 
 services:
   ris-mcp:
@@ -42,3 +43,11 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+    networks:
+      - default
+      - tunnel
+
+networks:
+  tunnel:
+    external: true
+    name: ${CF_NETWORK:?set CF_NETWORK to the docker network your cloudflared runs on}

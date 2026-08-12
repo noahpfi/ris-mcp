@@ -19,6 +19,28 @@ from .content import html_to_markdown, extract_metadata_blocks, parse_law_outlin
 from . import index as fts_index
 
 
+# One get_paragraph call fans out to one upstream fetch per paragraph, so the
+# range is the amplification lever a caller sees in the tool schema. Bounded
+# here rather than trusted.
+MAX_RANGE = 20
+
+_LEADING_DIGITS = re.compile(r"^\s*(\d+)")
+
+
+def _range_span(start: str, end: str) -> int | None:
+    """Paragraph count a range covers, or None when it is not plainly numeric.
+
+    Austrian paragraph numbers carry suffixes (§ 1295a), so anything that is not
+    a clean pair of integers is left to the per-result cap instead of guessed at.
+    """
+    if not end:
+        return None
+    lo, hi = _LEADING_DIGITS.match(start), _LEADING_DIGITS.match(end)
+    if not lo or not hi:
+        return None
+    return int(hi.group(1)) - int(lo.group(1)) + 1
+
+
 def _transport_security() -> TransportSecuritySettings | None:
     """Host/Origin allowlist for the MCP endpoint.
 
@@ -82,9 +104,16 @@ async def search_law(
 async def get_paragraph(
     law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
     paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
-    to_paragraph: Annotated[str, "End of range (optional), e.g. 1300"] = "",
+    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
 ) -> str:
     """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
+    span = _range_span(paragraph, to_paragraph)
+    if span is not None and span > MAX_RANGE:
+        return (
+            f"Range §§ {paragraph}–{to_paragraph} covers {span} paragraphs; the limit is "
+            f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
+        )
+
     refs, _ = await rc.search_bundesrecht(
         titel=law.strip(),
         abschnitt_von=paragraph,
@@ -98,7 +127,13 @@ async def get_paragraph(
 
     live = [r for r in refs if not rc._meta_from_ref(r)["repealed"]]
     refs = live if live else refs
+    # A range the API widens beyond what the span check allowed still has to be
+    # capped: this is the one tool where a single call fans out to many fetches.
+    refs = refs[:MAX_RANGE]
 
+    # Sequential on purpose. Fetching a range concurrently made RIS throttle us
+    # hard enough that _get_html's backoff pushed a 15-paragraph request past
+    # 60s; the range cap above is what bounds the work, not parallelism.
     parts: list[str] = []
     for ref in refs:
         meta = rc._meta_from_ref(ref)

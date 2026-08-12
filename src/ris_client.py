@@ -13,6 +13,8 @@ from cachetools import TTLCache
 
 from .config import MAX_UPSTREAM
 
+logger = logging.getLogger(__name__)
+
 BASE_URL = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
 CONTENT_BASE = "https://www.ris.bka.gv.at"
 USER_AGENT = "ris-mcp/0.1 (github.com/ris-mcp; legal research tool)"
@@ -25,6 +27,15 @@ _http: httpx.AsyncClient | None = None
 # unbounded request rate against a government API under our IP. Held around the
 # request only, so backoff sleeps do not sit on a permit.
 _egress = asyncio.Semaphore(MAX_UPSTREAM)
+
+
+class RisApiError(RuntimeError):
+    """Upstream failed. Carries no URL, no query string, no library internals.
+
+    httpx renders its own exceptions with the full request URL, and FastMCP
+    stringifies whatever a tool raises straight back to the caller — on a public
+    endpoint that hands out our exact upstream query construction for free.
+    """
 
 
 def _client() -> httpx.AsyncClient:
@@ -50,16 +61,18 @@ async def _get_json(params: dict[str, str]) -> dict[str, Any]:
             if resp.status_code == 429:
                 await asyncio.sleep(2 ** attempt)
                 continue
-            resp.raise_for_status()
+            if resp.is_error:
+                logger.warning("RIS API %s for params %s", resp.status_code, params)
+                raise RisApiError(f"RIS API returned HTTP {resp.status_code}.")
             data = resp.json()
             _cache[key] = data
             return data
         except httpx.TimeoutException:
             if attempt == 2:
-                raise
+                raise RisApiError("RIS API timed out.") from None
             await asyncio.sleep(1)
 
-    raise RuntimeError("RIS API unreachable after retries")
+    raise RisApiError("RIS API unreachable after retries.")
 
 
 async def _get_html(url: str) -> str:
@@ -75,15 +88,17 @@ async def _get_html(url: str) -> str:
                 wait = 2 ** attempt
                 await asyncio.sleep(wait)
                 continue
-            resp.raise_for_status()
+            if resp.is_error:
+                logger.warning("RIS content %s for %s", resp.status_code, url)
+                raise RisApiError(f"RIS returned HTTP {resp.status_code} for a document.")
             _cache[key] = resp.text
             return resp.text
         except httpx.TransportError:
             if attempt == 4:
-                raise
+                raise RisApiError("Could not reach RIS to fetch a document.") from None
             await asyncio.sleep(2 ** attempt)
 
-    logging.getLogger(__name__).warning("Skipping %s after retries", url)
+    logger.warning("Skipping %s after retries", url)
     return ""
 
 

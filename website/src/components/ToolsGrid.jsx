@@ -12,7 +12,7 @@ const TOOLS = [
   { name: 'get_law_outline', desc: 'full table of contents with § headings' },
   { name: 'lookup_bgbl', desc: 'Bundesgesetzblatt entry by number' },
   { name: 'get_amendment_timeline', desc: 'ordered list of every BGBl that amended a law' },
-  { name: 'who_mentions', desc: 'find laws that cite a given §  (local index)' },
+  { name: 'who_mentions', desc: 'find laws that cite a given § — self-host only', selfHost: true },
 ]
 
 export default function ToolsGrid() {
@@ -48,7 +48,19 @@ export default function ToolsGrid() {
       <div>
         {TOOLS.map(t => (
           <div key={t.name} className="tool-row">
-            <span className="tool-name">{t.name}</span>
+            <span className="tool-name">
+              {t.name}
+              {t.selfHost && (
+                <span style={{
+                  marginLeft: '0.5rem', padding: '0.05rem 0.4rem',
+                  borderRadius: '0.375rem', border: '1px solid var(--border)',
+                  fontFamily: 'var(--font-sans)', fontSize: '0.6875rem',
+                  fontWeight: 500, color: 'var(--text-muted)', whiteSpace: 'nowrap',
+                }}>
+                  self-host
+                </span>
+              )}
+            </span>
             <span className="tool-desc">{t.desc}</span>
           </div>
         ))}
@@ -58,11 +70,11 @@ export default function ToolsGrid() {
         marginTop: '1.5rem', fontSize: '0.875rem',
         color: 'var(--text-muted)', lineHeight: 1.6,
       }}>
-        <span style={{ color: 'var(--amber)' }}>who_mentions</span> requires a local full-text
-        index — clone the project and build it by running{' '}
-        <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8125rem', whiteSpace: 'nowrap' }}>
-          python -m src.index
-        </code>{' '}
+        The first seven query RIS live and are available on the hosted server.{' '}
+        <span style={{ color: 'var(--amber)' }}>who_mentions</span> searches a full-text index
+        of every Austrian federal provision to find the ones citing a given §. That index is
+        roughly 600&nbsp;MB and has to be crawled, so it is not part of the hosted server —{' '}
+        <a href="#setup" style={{ color: 'var(--amber)' }}>run it yourself</a> to get it.
       </p>
     </section>
   )

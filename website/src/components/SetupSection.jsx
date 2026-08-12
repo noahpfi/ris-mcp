@@ -33,9 +33,22 @@ function CopyBtn({ text }) {
   )
 }
 
+const HOSTED_URL = 'https://ris-mcp.noahpfister.com/mcp'
+const HOSTED_TEXT = `claude mcp add --transport http ris ${HOSTED_URL}`
+
+const HOSTED_CONFIG_TEXT = `{
+\t"mcpServers": {
+\t\t"ris": {
+\t\t\t"type": "http",
+\t\t\t"url": "${HOSTED_URL}"
+\t\t}
+\t}
+}`
+
 const INSTALL_TEXT = `git clone https://github.com/noahpfi/ris-mcp
 cd ris-mcp
-pip install -r requirements.txt`
+pip install -r requirements.txt
+python -m src.index          # builds the cross-reference index`
 
 const CONFIG_TEXT = `{
 \t"mcpServers": {
@@ -78,40 +91,86 @@ export default function SetupSection() {
         Setup
       </h2>
 
-      {/* Step 1 */}
+      {/* Hosted */}
       <div style={{ marginBottom: '2rem' }}>
         <p style={{
           fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-2)',
           marginBottom: '0.75rem', letterSpacing: '-0.01em',
         }}>
-          1 — Clone and install
+          Hosted — nothing to install
+        </p>
+        <p style={{
+          fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.875rem', lineHeight: 1.6,
+        }}>
+          Point your client at the URL. No Python, no clone, no API key. Gives you the seven
+          tools that query RIS live.
+        </p>
+        <div className="code-block" style={{ position: 'relative' }}>
+          <CopyBtn text={HOSTED_TEXT} />
+          <pre style={PRE}>
+            <span style={{ color: 'var(--amber)' }}>claude mcp add </span>
+            {`--transport http ris ${HOSTED_URL}`}
+          </pre>
+        </div>
+        <p style={{
+          fontSize: '0.875rem', color: 'var(--text-muted)',
+          margin: '0.875rem 0', lineHeight: 1.6,
+        }}>
+          For Claude Desktop and other clients, add it as a remote server in{' '}
+          <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
+            claude_desktop_config.json
+          </code>{' '}
+          and restart.
+        </p>
+        <div className="code-block" style={{ position: 'relative' }}>
+          <CopyBtn text={HOSTED_CONFIG_TEXT} />
+          <pre style={PRE}>
+            {'{\n'}
+            {'\t'}<span className="c-key">"mcpServers":</span>{' {\n'}
+            {'\t\t'}<span className="c-key">"ris":</span>{' {\n'}
+            {'\t\t\t'}<span className="c-key">"type":</span>{' '}<span className="c-str">"http"</span>{',\n'}
+            {'\t\t\t'}<span className="c-key">"url":</span>{' '}<span className="c-str">"{HOSTED_URL}"</span>{'\n'}
+            {'\t\t}\n'}
+            {'\t}\n'}
+            {'}'}
+          </pre>
+        </div>
+      </div>
+
+      {/* Self-host */}
+      <div style={{ marginBottom: '2rem' }}>
+        <p style={{
+          fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-2)',
+          marginBottom: '0.75rem', letterSpacing: '-0.01em',
+        }}>
+          Self-host — adds cross-references
+        </p>
+        <p style={{
+          fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.875rem', lineHeight: 1.6,
+        }}>
+          Run it locally to get{' '}
+          <span style={{ color: 'var(--amber)', fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
+            who_mentions
+          </span>{' '}
+          on top. Building the index crawls all 440,000 documents at about 9 per second, so
+          leave it running overnight; it lands at roughly 600&nbsp;MB on disk. Queries against
+          it are local and instant afterwards, and it resumes if interrupted.
         </p>
         <div className="code-block" style={{ position: 'relative' }}>
           <CopyBtn text={INSTALL_TEXT} />
           <pre style={PRE}>
             <span style={{ color: 'var(--amber)' }}>git clone </span>{'https://github.com/noahpfi/ris-mcp\n'}
             <span style={{ color: 'var(--amber)' }}>cd </span>{'ris-mcp\n'}
-            <span style={{ color: 'var(--amber)' }}>pip install </span>{'-r requirements.txt'}
+            <span style={{ color: 'var(--amber)' }}>pip install </span>{'-r requirements.txt\n'}
+            <span style={{ color: 'var(--amber)' }}>python </span>{'-m src.index'}
+            <span style={{ color: 'var(--text-muted)' }}>{'          # builds the index'}</span>
           </pre>
         </div>
-      </div>
-
-      {/* Step 2 */}
-      <div style={{ marginBottom: '2rem' }}>
         <p style={{
-          fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-2)',
-          marginBottom: '0.75rem', letterSpacing: '-0.01em',
+          fontSize: '0.875rem', color: 'var(--text-muted)',
+          margin: '0.875rem 0', lineHeight: 1.6,
         }}>
-          2 — Add to your MCP client
-        </p>
-        <p style={{
-          fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.875rem', lineHeight: 1.6,
-        }}>
-          For Claude Desktop, add this to{' '}
-          <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
-            claude_desktop_config.json
-          </code>{' '}
-          and restart. Other MCP clients work the same way.
+          Then point your client at the local process instead:
         </p>
         <div className="code-block" style={{ position: 'relative' }}>
           <CopyBtn text={CONFIG_TEXT} />
@@ -129,13 +188,13 @@ export default function SetupSection() {
         </div>
       </div>
 
-      {/* Step 3 */}
+      {/* Ask something */}
       <div>
         <p style={{
           fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-2)',
           marginBottom: '0.75rem', letterSpacing: '-0.01em',
         }}>
-          3 — Ask something
+          Ask something
         </p>
         <div
           style={{

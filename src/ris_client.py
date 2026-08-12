@@ -11,12 +11,20 @@ from typing import Any
 import httpx
 from cachetools import TTLCache
 
+from .config import MAX_UPSTREAM
+
 BASE_URL = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
 CONTENT_BASE = "https://www.ris.bka.gv.at"
 USER_AGENT = "ris-mcp/0.1 (github.com/ris-mcp; legal research tool)"
 
 _cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 _http: httpx.AsyncClient | None = None
+
+# Process-wide ceiling on requests in flight to RIS. Inbound load is
+# unauthenticated and unbounded; this is what keeps that from turning into an
+# unbounded request rate against a government API under our IP. Held around the
+# request only, so backoff sleeps do not sit on a permit.
+_egress = asyncio.Semaphore(MAX_UPSTREAM)
 
 
 def _client() -> httpx.AsyncClient:
@@ -37,7 +45,8 @@ async def _get_json(params: dict[str, str]) -> dict[str, Any]:
 
     for attempt in range(3):
         try:
-            resp = await _client().get(BASE_URL, params=params)
+            async with _egress:
+                resp = await _client().get(BASE_URL, params=params)
             if resp.status_code == 429:
                 await asyncio.sleep(2 ** attempt)
                 continue
@@ -60,7 +69,8 @@ async def _get_html(url: str) -> str:
 
     for attempt in range(5):
         try:
-            resp = await _client().get(url)
+            async with _egress:
+                resp = await _client().get(url)
             if resp.status_code in (429, 503):
                 wait = 2 ** attempt
                 await asyncio.sleep(wait)

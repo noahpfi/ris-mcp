@@ -3,8 +3,8 @@
 @theme {
   --color-amber: #C07845;
   --color-amber-light: #D49060;
-  --font-sans: "Space Grotesk", sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --font-sans: "Space Grotesk Variable", "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
 }
 
 /* ── Base ─────────────────────────────────────────────────────── */

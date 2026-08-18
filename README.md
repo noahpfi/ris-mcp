@@ -146,3 +146,27 @@ database.
 - Crawling and indexing interleave. Collecting every missing reference before
   fetching held ~20KB each, which is ~5.7GB against a full gap — enough to get
   the crawler OOM-killed.
+
+## Data, licence, disclaimer
+
+The code is MIT (see `LICENSE`). The legal data is not mine: it comes from RIS,
+published by the Bundeskanzleramt under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en), which requires
+attribution wherever it is passed on — every tool response carries that line, so
+leave it attached when you quote or re-serve the output.
+
+RIS states there is no guarantee of accuracy, currency, completeness, or
+availability, and that only the wording published in the Bundesgesetzblatt
+("BGBl authentisch") or the respective Landesgesetzblatt is legally binding. The
+consolidated texts these tools return are not. Nothing this server returns is
+legal advice.
+
+Independent project, not affiliated with, endorsed by, or operated by the
+Republic of Austria, the Bundeskanzleramt, or RIS. If you fork it, keep the name
+clear of any suggestion that it is an official federal service — RIS asks for
+that explicitly.
+
+Running your own crawl means bulk access to a government API: RIS asks for
+1–2s between paged requests, out-of-hours runs, a `User-Agent` header, and an
+email to ris.it@bka.gv.at with your IP and schedule before a mass download.
+`src/index.py` paces itself; the notification is on you.

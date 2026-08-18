@@ -64,14 +64,6 @@ export default function OutroSection() {
         </a>
       </div>
 
-      <p style={{
-        marginTop: '2.5rem',
-        fontSize: '0.8125rem', color: 'var(--text-muted)',
-        lineHeight: 1.6, maxWidth: '460px',
-      }}>
-        Not affiliated with the Austrian government or RIS.
-        Always verify legal information with a qualified professional.
-      </p>
     </section>
   )
 }

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
 CONTENT_BASE = "https://www.ris.bka.gv.at"
-USER_AGENT = "ris-mcp/0.1 (github.com/ris-mcp; legal research tool)"
+USER_AGENT = "ris-mcp/0.1 (+https://github.com/noahpfi/ris-mcp; legal research tool)"
 
 _cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 _http: httpx.AsyncClient | None = None

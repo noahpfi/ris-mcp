@@ -81,3 +81,13 @@ Tests run offline against a temporary database.
 
 - API base is `https://data.bka.gv.at/ris/api/v2.6/`, public and unauthenticated. `BrKons` serves consolidated federal law, `BgblAuth` serves gazette entries from 2004 on.
 - `RIS_MAX_UPSTREAM` caps in-flight requests to RIS regardless of inbound load, which keeps a public endpoint from flooding a government API.
+
+## Legal
+
+Code is MIT licensed. Legal data comes from RIS, published by the Bundeskanzleramt under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Every tool response carries that attribution, keep it attached when quoting or re-serving output.
+
+Only the Bundesgesetzblatt ("BGBl authentisch") is legally binding, consolidated texts returned here are not. RIS gives no warranty on accuracy or completeness, and nothing here is legal advice.
+
+This is an independent project, not affiliated with the Republic of Austria, the Bundeskanzleramt or RIS. Forks should keep their name clear of anything suggesting an official service.
+
+Running your own crawl means bulk access to a government API. RIS asks for 1–2s between paged requests, off-hours runs, a `User-Agent` header, and an email to ris.it@bka.gv.at with your IP and schedule beforehand.

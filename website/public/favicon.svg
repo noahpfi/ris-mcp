@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1385 1385" width="1385" height="1385" role="img" aria-label="NP">
+  <rect width="1385" height="1385" rx="249" fill="#0b0b0c"/>
+  <g transform="translate(151 1047) scale(1 -1)" fill="#fafaf8">
+    <path transform="translate(-64 0)" d="M64 0V710H203L422 198L400 194V710H536V0H397L178 512L200 517V0Z"/>
+    <path transform="translate(526 0)" d="M78 0V710H307Q381 710 437.0 681.5Q493 653 524.5 601.5Q556 550 556 482Q556 413 524.5 362.0Q493 311 437.0 282.5Q381 254 307 254H220V0ZM220 383H292Q352 383 381.0 408.0Q410 433 410 482Q410 531 381.0 556.5Q352 582 292 582H220Z"/>
+  </g>
+</svg>

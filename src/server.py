@@ -24,6 +24,22 @@ MAX_RANGE = 20
 
 _LEADING_DIGITS = re.compile(r"^\s*(\d+)")
 
+# CC BY 4.0 requires attribution on pass-on; only gazette wording binding -> note on response, website reaches nobody
+SOURCE_CONSOLIDATED = (
+    "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0). Consolidated text — "
+    "no guarantee of accuracy, currency or completeness; only the wording published in the "
+    "Bundesgesetzblatt (\"BGBl authentisch\") is legally binding. Not legal advice.*"
+)
+SOURCE_AUTHENTIC = (
+    "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0), Bundesgesetzblatt "
+    "authentisch. Not legal advice.*"
+)
+
+
+def _sourced(body: str, authentic: bool = False) -> str:
+    """append source, licence, bindingness to RIS-data response"""
+    return body + (SOURCE_AUTHENTIC if authentic else SOURCE_CONSOLIDATED)
+
 
 def _range_span(start: str, end: str) -> int | None:
     """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
@@ -48,6 +64,15 @@ def _transport_security() -> TransportSecuritySettings | None:
 
 mcp = FastMCP(
     "ris-mcp",
+    instructions=(
+        "Independent open-source reader for Austria's public RIS OGD API. Not affiliated "
+        "with, endorsed by or operated by the Austrian government, the Bundeskanzleramt or "
+        "RIS. Documents are returned as RIS serves them; consolidated law can be outdated or "
+        "incomplete and is not legally binding — only the Bundesgesetzblatt (\"BGBl "
+        "authentisch\") is. Treat results as research material, never as legal advice, and "
+        "keep the source note attached when quoting them."
+    ),
+    website_url="https://ris-mcp.noahpfister.com",
     dependencies=["httpx", "cachetools", "selectolax"],
     host=config.HOST,
     port=config.PORT,
@@ -84,7 +109,7 @@ async def search_law(
         lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
 @mcp.tool()
@@ -132,7 +157,7 @@ async def get_paragraph(
         parts.append(text)
         parts.append("")
 
-    return "\n".join(parts)
+    return _sourced("\n".join(parts))
 
 
 @mcp.tool()
@@ -159,14 +184,14 @@ async def get_paragraph_at(
     html = await rc.fetch_document_html(ref)
     text = html_to_markdown(html)
 
-    return "\n".join([
+    return _sourced("\n".join([
         f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
         f"*{meta['kundmachung']}*",
         f"*In force from: {meta['in_force_from']}*",
         f"*Document: {meta['document_id']}*",
         "",
         text,
-    ])
+    ]))
 
 
 @mcp.tool()
@@ -219,7 +244,9 @@ async def get_statute(
                 parts.append(text)
                 parts.append("")
 
-    return "\n".join(parts) if parts else f"Statute '{name}' not found."
+    if not parts:
+        return f"Statute '{name}' not found."
+    return _sourced("\n".join(parts))
 
 
 @mcp.tool()
@@ -254,7 +281,7 @@ async def get_law_outline(
     if not outline:
         return f"Could not parse outline for '{law}'."
 
-    return f"# {meta['short_title']} — Table of Contents\n\n{outline}"
+    return _sourced(f"# {meta['short_title']} — Table of Contents\n\n{outline}")
 
 
 @mcp.tool()
@@ -296,7 +323,7 @@ async def lookup_bgbl(
     if "Text" in blocks:
         lines.append(f"\n### Content\n{blocks['Text'][:2000]}")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines), authentic=True)
 
 
 @mcp.tool()
@@ -332,7 +359,7 @@ async def get_amendment_timeline(
     for i, a in enumerate(amendments, 1):
         lines.append(f"{i}. {a}")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
 async def who_mentions(
@@ -372,7 +399,7 @@ async def who_mentions(
         lines.append(f"  URL: {r['doc_url']}")
         lines.append("")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
 # registered last, conditionally; hosted runs index-free, hidden tool beats always-unavailable one

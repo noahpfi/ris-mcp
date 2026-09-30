@@ -1,9 +1,0 @@
-*
-!requirements.lock
-!src
-!website
-src/__pycache__
-website/node_modules
-website/dist
-website/.vite
-**/.DS_Store

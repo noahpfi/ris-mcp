@@ -64,7 +64,7 @@ All variables are optional. Defaults suit a local stdio run.
 | `RIS_PUBLIC_HOSTS` | — | Comma-separated Host allowlist, required on non-loopback bind |
 | `RIS_INDEX` | `auto` | `auto` registers `who_mentions` when the index exists, `on` requires it, `off` disables it |
 | `RIS_DB_PATH` | `data/ris.db` | FTS index location |
-| `RIS_STATIC_DIR` | — | Built landing page served at `/`, set to `/app/website` in the image |
+| `RIS_STATIC_DIR` | — | Built landing page served at `/` |
 | `RIS_MAX_UPSTREAM` | `4` | Concurrent requests to RIS per process |
 | `RIS_RATE_LIMIT` / `RIS_RATE_WINDOW` | `60` / `60` | Per-IP token bucket, `0` disables it |
 | `RIS_LOG_LEVEL` | `INFO` | |

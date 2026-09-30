@@ -142,7 +142,6 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
     return {
         "document_id": technisch.get("ID", ""),
         "doc_url": allgemein.get("DokumentUrl", ""),
-        "geaendert": allgemein.get("Geaendert", ""),
         "short_title": bundesrecht.get("Kurztitel", ""),
         "abbreviation": brkons.get("Abkuerzung", bundesrecht.get("Abkuerzung", "")),
         "paragraph": brkons.get("ArtikelParagraphAnlage", ""),

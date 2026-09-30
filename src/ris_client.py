@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from cachetools import TTLCache
@@ -16,6 +18,8 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
 CONTENT_BASE = "https://www.ris.bka.gv.at"
 USER_AGENT = "ris-mcp/0.1 (+https://github.com/noahpfi/ris-mcp; legal research tool)"
+
+_VIENNA = ZoneInfo("Europe/Vienna")
 
 _cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 _http: httpx.AsyncClient | None = None
@@ -120,24 +124,32 @@ def _html_url_from_ref(ref: dict[str, Any]) -> str | None:
     return None
 
 
+def today() -> str:
+    """ISO date in Vienna, RIS dates = Austrian calendar days, server clock may be UTC"""
+    return datetime.now(_VIENNA).date().isoformat()
+
+
 def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
     meta = ref.get("Data", {}).get("Metadaten", {})
     technisch = meta.get("Technisch", {})
     allgemein = meta.get("Allgemein", {})
     bundesrecht = meta.get("Bundesrecht", {})
     brkons = bundesrecht.get("BrKons", {})
+    # Ausserkrafttretensdatum = last day in force; future date = scheduled expiry, still live
+    expiry = brkons.get("Ausserkrafttretensdatum", "")
+    repealed = expiry if expiry and expiry < today() else ""
 
     return {
         "document_id": technisch.get("ID", ""),
         "doc_url": allgemein.get("DokumentUrl", ""),
-        "geaendert": allgemein.get("Geaendert", ""),
         "short_title": bundesrecht.get("Kurztitel", ""),
         "abbreviation": brkons.get("Abkuerzung", bundesrecht.get("Abkuerzung", "")),
         "paragraph": brkons.get("ArtikelParagraphAnlage", ""),
         "paragraph_number": brkons.get("Paragraphnummer", ""),
         "kundmachung": brkons.get("Kundmachungsorgan", ""),
         "in_force_from": brkons.get("Inkrafttretensdatum", ""),
-        "repealed": brkons.get("Ausserkrafttretensdatum", ""),
+        "repealed": repealed,
+        "valid_until": "" if repealed else expiry,
         "outline_url": brkons.get("GesamteRechtsvorschriftUrl", ""),
         "doc_type": brkons.get("Dokumenttyp", ""),
         "eli": bundesrecht.get("Eli", ""),

@@ -6,7 +6,7 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 
 | Tool | Purpose | Hosted |
 |---|---|---|
-| `search_law` | Full-text search across Bundesrecht, newest first, deduplicated by law and paragraph | ✓ |
+| `search_law` | Full-text search across Bundesrecht in force today, newest first | ✓ |
 | `get_paragraph` | Fetch a paragraph or range such as §§ 200–210 UGB, live version only | ✓ |
 | `get_paragraph_at` | Historical version of a paragraph on a given date | ✓ |
 | `get_statute` | Preamble and first page of live paragraphs for a statute | ✓ |

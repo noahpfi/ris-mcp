@@ -41,6 +41,10 @@ def _sourced(body: str, authentic: bool = False) -> str:
     return body + (SOURCE_AUTHENTIC if authentic else SOURCE_CONSOLIDATED)
 
 
+def _expiry_note(meta: dict[str, Any]) -> str:
+    return f"  valid until {meta['valid_until']}" if meta["valid_until"] else ""
+
+
 def _range_span(start: str, end: str) -> int | None:
     """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
     if not end:
@@ -94,39 +98,23 @@ async def search_law(
     Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
     text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
     Prefer get_law_outline to browse a known statute's table of contents.
-    Results are sorted by most recently amended first.
+    Only versions in force today are searched, most recently entered into force first.
     """
-    refs, total = await rc.search_bundesrecht(suchworte=query, titel=law.strip(), pro_seite="Fifty")
+    refs, total = await rc.search_bundesrecht(
+        suchworte=query, titel=law.strip(), fassung_vom=rc.today(), pro_seite="Fifty"
+    )
 
     if not refs:
-        return "No results found."
+        return "No results in force today. Repealed wording is reachable via get_paragraph_at."
 
-    # dedup per law+paragraph, live wins, else newest in_force_from
-    seen: dict[tuple[str, str], dict] = {}
+    refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["in_force_from"], reverse=True)
+
+    lines = [f"Found {total} result(s) in force today, showing {len(refs)}, newest first.\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
-        key = (meta["short_title"], meta["paragraph_number"])
-        prev = seen.get(key)
-        if prev is None:
-            seen[key] = ref
-        else:
-            pm = rc._meta_from_ref(prev)
-            prev_live = not pm["repealed"]
-            curr_live = not meta["repealed"]
-            if curr_live and not prev_live:
-                seen[key] = ref
-            elif curr_live == prev_live and meta["in_force_from"] > pm["in_force_from"]:
-                seen[key] = ref
-
-    deduped = sorted(seen.values(), key=lambda r: rc._meta_from_ref(r)["geaendert"], reverse=True)
-
-    lines = [f"Found {total} result(s) ({len(deduped)} unique laws/paragraphs), newest first.\n"]
-    for ref in deduped:
-        meta = rc._meta_from_ref(ref)
-        repeal_note = f"  ⚠ REPEALED {meta['repealed']}" if meta["repealed"] else ""
-        lines.append(f"**{meta['short_title']}** {meta['paragraph']}{repeal_note}")
+        lines.append(f"**{meta['short_title']}** {meta['paragraph']}{_expiry_note(meta)}")
         lines.append(f"  Document: {meta['document_id']}")
-        lines.append(f"  Last amended: {meta['geaendert']}  In force: {meta['in_force_from']}")
+        lines.append(f"  In force: {meta['in_force_from']}")
         lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 
@@ -152,14 +140,16 @@ async def get_paragraph(
         abschnitt_von=paragraph,
         abschnitt_bis=to_paragraph or paragraph,
         abschnitt_typ="Paragraph",
+        fassung_vom=rc.today(),
         pro_seite="Fifty",
     )
 
     if not refs:
-        return f"No results for {law} § {paragraph}."
+        return (
+            f"No version of {law} § {paragraph} in force today. "
+            "Repealed wording is reachable via get_paragraph_at."
+        )
 
-    live = [r for r in refs if not rc._meta_from_ref(r)["repealed"]]
-    refs = live if live else refs
     # API may widen range past span check -> cap again, one call fans out to many fetches
     refs = refs[:MAX_RANGE]
 
@@ -169,10 +159,9 @@ async def get_paragraph(
         meta = rc._meta_from_ref(ref)
         html = await rc.fetch_document_html(ref)
         text = html_to_markdown(html)
-        repeal_note = f"  ⚠ repealed: {meta['repealed']}" if meta["repealed"] else ""
         parts.append(f"### {meta['short_title']} {meta['paragraph']}")
         parts.append(f"*{meta['kundmachung']}*")
-        parts.append(f"*In force from: {meta['in_force_from']}{repeal_note}*")
+        parts.append(f"*In force from: {meta['in_force_from']}{_expiry_note(meta)}*")
         parts.append(f"*Document: {meta['document_id']}*")
         parts.append("")
         parts.append(text)
@@ -227,6 +216,7 @@ async def get_statute(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
+        fassung_vom=rc.today(),
         pro_seite="Fifty",
     )
 
@@ -250,18 +240,13 @@ async def get_statute(
 
     refs_body, total = await rc.search_bundesrecht(
         titel=titel,
+        fassung_vom=rc.today(),
         pro_seite="Ten",
         seite=1,
     )
 
     if refs_body:
-        live_body = [r for r in refs_body if not rc._meta_from_ref(r)["repealed"]]
-        refs_body = live_body if live_body else refs_body
-        seen_paras: set[str] = set()
-        refs_body = [r for r in refs_body
-                     if rc._meta_from_ref(r)["paragraph_number"] not in seen_paras
-                     and not seen_paras.add(rc._meta_from_ref(r)["paragraph_number"])]  # type: ignore[func-returns-value]
-        parts.append(f"*Statute has {total} total sections. Showing first {len(refs_body)} live paragraphs.*\n")
+        parts.append(f"*Statute has {total} sections in force. Showing first {len(refs_body)}.*\n")
         htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs_body])
         for ref, html in zip(refs_body, htmls):
             meta = rc._meta_from_ref(ref)
@@ -290,10 +275,11 @@ async def get_law_outline(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
+        fassung_vom=rc.today(),
         pro_seite="Fifty",
     )
     if not refs:
-        refs, _ = await rc.search_bundesrecht(titel=titel, pro_seite="Ten")
+        refs, _ = await rc.search_bundesrecht(titel=titel, fassung_vom=rc.today(), pro_seite="Ten")
     if not refs:
         return f"Law '{law}' not found."
 
@@ -365,6 +351,7 @@ async def get_amendment_timeline(
         abschnitt_von="0",
         abschnitt_bis="0",
         abschnitt_typ="Paragraph",
+        fassung_vom=rc.today(),
         pro_seite="Fifty",
     )
 

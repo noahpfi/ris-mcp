@@ -1,17 +1,87 @@
-"""RIS MCP server — Austrian federal law for LLMs."""
+"""RIS MCP server, Austrian federal law for LLMs"""
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
+from . import config
+from . import http_app
 from . import ris_client as rc
 from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
 from . import index as fts_index
 
-mcp = FastMCP("ris-mcp", dependencies=["httpx", "cachetools", "selectolax"])
+
+# get_paragraph fans out one upstream fetch per paragraph -> range = amplification lever, capped
+MAX_RANGE = 20
+
+_LEADING_DIGITS = re.compile(r"^\s*(\d+)")
+
+# CC BY 4.0 requires attribution on pass-on; only gazette wording binding -> note on response, website reaches nobody
+SOURCE_CONSOLIDATED = (
+    "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0). Consolidated text — "
+    "no guarantee of accuracy, currency or completeness; only the wording published in the "
+    "Bundesgesetzblatt (\"BGBl authentisch\") is legally binding. Not legal advice.*"
+)
+SOURCE_AUTHENTIC = (
+    "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0), Bundesgesetzblatt "
+    "authentisch. Not legal advice.*"
+)
+
+
+def _sourced(body: str, authentic: bool = False) -> str:
+    """append source, licence, bindingness to RIS-data response"""
+    return body + (SOURCE_AUTHENTIC if authentic else SOURCE_CONSOLIDATED)
+
+
+def _range_span(start: str, end: str) -> int | None:
+    """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
+    if not end:
+        return None
+    lo, hi = _LEADING_DIGITS.match(start), _LEADING_DIGITS.match(end)
+    if not lo or not hi:
+        return None
+    return int(hi.group(1)) - int(lo.group(1)) + 1
+
+
+def _transport_security() -> TransportSecuritySettings | None:
+    """Host/Origin allowlist; FastMCP enables it only on loopback -> binding 0.0.0.0 silently drops check"""
+    if not config.PUBLIC_HOSTS:
+        return None
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=config.PUBLIC_HOSTS,
+        allowed_origins=[f"https://{host}" for host in config.PUBLIC_HOSTS],
+    )
+
+
+mcp = FastMCP(
+    "ris-mcp",
+    instructions=(
+        "Independent open-source reader for Austria's public RIS OGD API. Not affiliated "
+        "with, endorsed by or operated by the Austrian government, the Bundeskanzleramt or "
+        "RIS. Documents are returned as RIS serves them; consolidated law can be outdated or "
+        "incomplete and is not legally binding — only the Bundesgesetzblatt (\"BGBl "
+        "authentisch\") is. Treat results as research material, never as legal advice, and "
+        "keep the source note attached when quoting them."
+    ),
+    website_url="https://ris-mcp.noahpfister.com",
+    dependencies=["httpx", "cachetools", "selectolax"],
+    host=config.HOST,
+    port=config.PORT,
+    log_level=config.LOG_LEVEL,
+    # stateless -> dumb tunnel, no affinity; json_response keeps off SSE, suits Cloudflare proxy buffering
+    stateless_http=True,
+    json_response=True,
+    transport_security=_transport_security(),
+)
 
 
 @mcp.tool()
@@ -31,7 +101,7 @@ async def search_law(
     if not refs:
         return "No results found."
 
-    # deduplicate: per (law, paragraph) keep live version; if all repealed keep newest by in_force_from
+    # dedup per law+paragraph, live wins, else newest in_force_from
     seen: dict[tuple[str, str], dict] = {}
     for ref in refs:
         meta = rc._meta_from_ref(ref)
@@ -41,7 +111,6 @@ async def search_law(
             seen[key] = ref
         else:
             pm = rc._meta_from_ref(prev)
-            # prefer live over repealed; if same liveness prefer newer in_force_from
             prev_live = not pm["repealed"]
             curr_live = not meta["repealed"]
             if curr_live and not prev_live:
@@ -61,16 +130,23 @@ async def search_law(
         lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
 @mcp.tool()
 async def get_paragraph(
     law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
     paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
-    to_paragraph: Annotated[str, "End of range (optional), e.g. 1300"] = "",
+    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
 ) -> str:
     """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
+    span = _range_span(paragraph, to_paragraph)
+    if span is not None and span > MAX_RANGE:
+        return (
+            f"Range §§ {paragraph}–{to_paragraph} covers {span} paragraphs; the limit is "
+            f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
+        )
+
     refs, _ = await rc.search_bundesrecht(
         titel=law.strip(),
         abschnitt_von=paragraph,
@@ -84,7 +160,10 @@ async def get_paragraph(
 
     live = [r for r in refs if not rc._meta_from_ref(r)["repealed"]]
     refs = live if live else refs
+    # API may widen range past span check -> cap again, one call fans out to many fetches
+    refs = refs[:MAX_RANGE]
 
+    # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
     parts: list[str] = []
     for ref in refs:
         meta = rc._meta_from_ref(ref)
@@ -99,7 +178,7 @@ async def get_paragraph(
         parts.append(text)
         parts.append("")
 
-    return "\n".join(parts)
+    return _sourced("\n".join(parts))
 
 
 @mcp.tool()
@@ -126,14 +205,14 @@ async def get_paragraph_at(
     html = await rc.fetch_document_html(ref)
     text = html_to_markdown(html)
 
-    return "\n".join([
+    return _sourced("\n".join([
         f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
         f"*{meta['kundmachung']}*",
         f"*In force from: {meta['in_force_from']}*",
         f"*Document: {meta['document_id']}*",
         "",
         text,
-    ])
+    ]))
 
 
 @mcp.tool()
@@ -192,7 +271,9 @@ async def get_statute(
                 parts.append(text)
                 parts.append("")
 
-    return "\n".join(parts) if parts else f"Statute '{name}' not found."
+    if not parts:
+        return f"Statute '{name}' not found."
+    return _sourced("\n".join(parts))
 
 
 @mcp.tool()
@@ -227,7 +308,7 @@ async def get_law_outline(
     if not outline:
         return f"Could not parse outline for '{law}'."
 
-    return f"# {meta['short_title']} — Table of Contents\n\n{outline}"
+    return _sourced(f"# {meta['short_title']} — Table of Contents\n\n{outline}")
 
 
 @mcp.tool()
@@ -269,7 +350,7 @@ async def lookup_bgbl(
     if "Text" in blocks:
         lines.append(f"\n### Content\n{blocks['Text'][:2000]}")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines), authentic=True)
 
 
 @mcp.tool()
@@ -305,29 +386,35 @@ async def get_amendment_timeline(
     for i, a in enumerate(amendments, 1):
         lines.append(f"{i}. {a}")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
-@mcp.tool()
 async def who_mentions(
     reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
-    limit: Annotated[int, "Max results to return (default 20)"] = 20,
+    limit: Annotated[int, "Max results to return (1-100, default 20)"] = 20,
 ) -> str:
     """Full-text search the local RIS index for laws that mention a given citation.
 
-    Requires the local index to be built first (run index.py crawl).
+    Reverse citation lookup: finds provisions that cite the one you name.
+    Backed by a locally built FTS index, so it is only registered where that
+    index exists.
     """
-    count = fts_index.doc_count()
+    # negative LIMIT = unbounded in SQLite -> clamp, else -1 returns whole match set
+    limit = max(1, min(limit, 100))
+
+    # SQLite blocks, FTS5 full scan slow -> off event loop or every request stalls
+    count = await asyncio.to_thread(fts_index.doc_count)
     if count == 0:
         return (
             "Local index is empty. Build it first by running:\n"
             "  python3 -m src.index\n"
-            "This crawls ~250k documents and takes 30-90 minutes."
+            "That crawls ~441k documents at roughly 9/s, so plan for an overnight run."
         )
 
-    fts_query = reference.replace("§", "").replace("Art.", "").strip()
-    fts_query = '"' + fts_query.replace('"', '""') + '"'
-    results = fts_index.search_fts(fts_query, limit=limit)
+    if not fts_index.fts_query(reference):
+        return f"'{reference}' holds no searchable term."
+
+    results = await asyncio.to_thread(fts_index.search_fts, reference, limit)
     if not results:
         return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
 
@@ -339,11 +426,49 @@ async def who_mentions(
         lines.append(f"  URL: {r['doc_url']}")
         lines.append("")
 
-    return "\n".join(lines)
+    return _sourced("\n".join(lines))
 
 
-def main():
-    mcp.run()
+# registered last, conditionally; hosted runs index-free, hidden tool beats always-unavailable one
+if config.index_enabled():
+    mcp.add_tool(who_mentions)
+
+
+@mcp.custom_route(http_app.HEALTH_PATH, methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Liveness probe, plus which tool surface this instance is serving.
+
+    An empty or stale index is reported, not failed: the other seven tools hit
+    the RIS API directly and work without it.
+    """
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "index": config.index_enabled(),
+        "tools": len(await mcp.list_tools()),
+    }
+    if config.index_enabled():
+        payload["docs"] = await asyncio.to_thread(fts_index.doc_count)
+        payload["last_crawl"] = await asyncio.to_thread(fts_index.last_crawl)
+    return JSONResponse(payload)
+
+
+async def _serve_stdio() -> None:
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await rc.close()
+
+
+def main() -> None:
+    config.validate_runtime()
+    logging.basicConfig(
+        level=config.LOG_LEVEL,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if config.TRANSPORT == "streamable-http":
+        anyio.run(http_app.serve, mcp)
+    else:
+        anyio.run(_serve_stdio)
 
 
 if __name__ == "__main__":

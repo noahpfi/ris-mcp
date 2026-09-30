@@ -3,6 +3,8 @@ name = "ris-mcp"
 version = "0.1.0"
 description = "MCP server for Austria's RIS (Rechtsinformationssystem)"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "mcp[cli]>=1.0.0",
     "httpx>=0.27.0",
@@ -25,4 +27,9 @@ packages = ["src"]
 dev-dependencies = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "asgi-lifespan>=2.1.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -1,22 +1,31 @@
-"""
-HTTP wrapper for the RIS OGD API v2.6.
-Base URL: https://data.bka.gv.at/ris/api/v2.6/
-"""
+"""RIS OGD API v2.6 client, base https://data.bka.gv.at/ris/api/v2.6/"""
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
 from cachetools import TTLCache
 
+from .config import MAX_UPSTREAM
+
+logger = logging.getLogger(__name__)
+
 BASE_URL = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
 CONTENT_BASE = "https://www.ris.bka.gv.at"
-USER_AGENT = "ris-mcp/0.1 (github.com/ris-mcp; legal research tool)"
+USER_AGENT = "ris-mcp/0.1 (+https://github.com/noahpfi/ris-mcp; legal research tool)"
 
 _cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 _http: httpx.AsyncClient | None = None
+
+# caps RIS in-flight requests vs unbounded public inbound; held per request, not during backoff
+_egress = asyncio.Semaphore(MAX_UPSTREAM)
+
+
+class RisApiError(RuntimeError):
+    """no URL/query/internals in message; FastMCP relays raised text -> would leak upstream query shape"""
 
 
 def _client() -> httpx.AsyncClient:
@@ -37,20 +46,23 @@ async def _get_json(params: dict[str, str]) -> dict[str, Any]:
 
     for attempt in range(3):
         try:
-            resp = await _client().get(BASE_URL, params=params)
+            async with _egress:
+                resp = await _client().get(BASE_URL, params=params)
             if resp.status_code == 429:
                 await asyncio.sleep(2 ** attempt)
                 continue
-            resp.raise_for_status()
+            if resp.is_error:
+                logger.warning("RIS API %s for params %s", resp.status_code, params)
+                raise RisApiError(f"RIS API returned HTTP {resp.status_code}.")
             data = resp.json()
             _cache[key] = data
             return data
         except httpx.TimeoutException:
             if attempt == 2:
-                raise
+                raise RisApiError("RIS API timed out.") from None
             await asyncio.sleep(1)
 
-    raise RuntimeError("RIS API unreachable after retries")
+    raise RisApiError("RIS API unreachable after retries.")
 
 
 async def _get_html(url: str) -> str:
@@ -60,20 +72,23 @@ async def _get_html(url: str) -> str:
 
     for attempt in range(5):
         try:
-            resp = await _client().get(url)
+            async with _egress:
+                resp = await _client().get(url)
             if resp.status_code in (429, 503):
                 wait = 2 ** attempt
                 await asyncio.sleep(wait)
                 continue
-            resp.raise_for_status()
+            if resp.is_error:
+                logger.warning("RIS content %s for %s", resp.status_code, url)
+                raise RisApiError(f"RIS returned HTTP {resp.status_code} for a document.")
             _cache[key] = resp.text
             return resp.text
         except httpx.TransportError:
             if attempt == 4:
-                raise
+                raise RisApiError("Could not reach RIS to fetch a document.") from None
             await asyncio.sleep(2 ** attempt)
 
-    logging.getLogger(__name__).warning("Skipping %s after retries", url)
+    logger.warning("Skipping %s after retries", url)
     return ""
 
 
@@ -191,22 +206,21 @@ async def search_bgbl_auth(
 
 
 def best_law_match(refs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
-    """Pick the ref whose abbreviation or short title best matches query, preferring live laws."""
-    import re as _re
+    """best abbreviation/short-title match, live laws preferred"""
     if not refs:
         return None
     live = [r for r in refs if not _meta_from_ref(r)["repealed"]]
     pool = live if live else refs
     q = query.strip().upper()
-    # strip trailing year for fuzzy matching, e.g. "UStG" matches "UStG 1994"
-    q_base = _re.sub(r'\s*\d{4}\s*$', '', q).strip()
+    # drop trailing year -> "UStG" matches "UStG 1994"
+    q_base = re.sub(r'\s*\d{4}\s*$', '', q).strip()
     for ref in pool:
         m = _meta_from_ref(ref)
         if m["abbreviation"].upper() == q:
             return ref
     for ref in pool:
         m = _meta_from_ref(ref)
-        abbr_base = _re.sub(r'\s*\d{4}\s*$', '', m["abbreviation"]).upper().strip()
+        abbr_base = re.sub(r'\s*\d{4}\s*$', '', m["abbreviation"]).upper().strip()
         if abbr_base == q_base and q_base:
             return ref
     for ref in pool:

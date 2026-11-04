@@ -24,6 +24,8 @@ DSG = ("10001597", "Datenschutzgesetz", "DSG")
     ("Anl. 1", "Anl. 1"),
     ("Anlage 2", "Anl. 2"),
     ("Art. 10 § 1", "Art. 10 § 1"),
+    ("Anl. 1/ThNa", "Anl. 1/ThNa"),
+    ("Anlage 2/m1", "Anl. 2/m1"),
     ("§ 1.", "§ 1"),
 ])
 def test_citation_forms_parse_to_ris_labels(text, expected):
@@ -99,6 +101,18 @@ async def test_bare_number_falls_back_to_articles(monkeypatch):
     out = await server.get_paragraph(law="B-VG", paragraph="Art. 14", to_paragraph="15")
     assert [line.split("Verfassungsgesetz ", 1)[1] for line in out.splitlines() if line.startswith("### Bundes")] == ["Art. 14", "Art. 14a", "Art. 15"]
     assert "### Bundes-Verfassungsgesetz Anl. 1" in await server.get_paragraph(law="B-VG", paragraph="Anlage 1")
+
+
+async def test_sub_annexes_are_addressable_and_sort_under_their_annex(monkeypatch):
+    """live: Lehrpläne AHS holds Anl. 1, Anl. 1/e … Anl. 1/zbrgo, Anl. 2"""
+    FakeRis(law("10008568", "Lehrpläne – allgemeinbildende höhere Schulen", "", "Anl. 1", "Anl. 1/e", "Anl. 1/ThNa", "Anl. 2")).install(monkeypatch)
+
+    def shown(out):
+        return [line.split("Schulen ", 1)[1] for line in out.splitlines() if line.startswith("### Lehrpläne")]
+
+    assert shown(await server.get_paragraph(law="10008568", paragraph="Anl. 1")) == ["Anl. 1"]
+    assert shown(await server.get_paragraph(law="10008568", paragraph="anl. 1/thna")) == ["Anl. 1/ThNa"]
+    assert shown(await server.get_paragraph(law="10008568", paragraph="Anl. 1", to_paragraph="2")) == ["Anl. 1", "Anl. 1/e", "Anl. 1/ThNa", "Anl. 2"]
 
 
 async def test_paragraph_inside_a_non_transitional_article_is_found(monkeypatch):

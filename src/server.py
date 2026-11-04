@@ -166,7 +166,8 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
     end = sections.end_of_range(start, to_paragraph) if start and to_paragraph else start
     if start is None or end is None:
         return f"Cannot read '{paragraph}{' to ' + to_paragraph if to_paragraph else ''}' as a citation. Use forms like {CITATION_FORMS}."
-    if end.outer != start.outer or end.last.kind != start.last.kind or end.last.key < start.last.key:
+    same_container = [u.key for u in end.outer] == [u.key for u in start.outer]
+    if not same_container or end.last.kind != start.last.kind or end.last.key < start.last.key:
         return f"Range {start} to {end} does not run forward within one kind of unit."
     span = end.last.number - start.last.number + 1
     if span > MAX_RANGE:
@@ -188,8 +189,8 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
         refs, total = await rc.search_bundesrecht_pages(
             MAX_UNIT_PAGES,
             gesetzesnummer=resolution.law.number,
-            abschnitt_von=f"{lo.number}{lo.suffix}",
-            abschnitt_bis=f"{hi.number}{hi.suffix}",
+            abschnitt_von=lo.query,
+            abschnitt_bis=hi.query,
             abschnitt_typ=sections.ABSCHNITT_TYP[lo.kind],
             fassung_vom=date,
         )

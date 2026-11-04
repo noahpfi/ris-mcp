@@ -1,4 +1,4 @@
-"""citations in RIS label shapes: § 5a, Art. 7, Anl. 1, Art. 10 § 1"""
+"""citations in RIS label shapes: § 5a, Art. 7, Anl. 1, Anl. 1/lF, Art. 10 § 1"""
 from __future__ import annotations
 
 import re
@@ -12,7 +12,8 @@ ABSCHNITT_TYP = {"§": "Paragraph", "Art.": "Artikel", "Anl.": "Anlage"}
 IMPLICIT_KINDS = ("§", "Art.", "Anl.")
 
 _KINDS = {"§": "§", "§§": "§", "art": "Art.", "artikel": "Art.", "anl": "Anl.", "anlage": "Anl."}
-_TOKEN = re.compile(r"\s*(?:(§§?|artikel|art|anlage|anl)\.?\s*)?(\d+)\s*([a-z]{0,2})(?![a-z])\.?", re.IGNORECASE)
+# sub = annex part after slash, mixed case in RIS: Anl. 1/ThNa
+_TOKEN = re.compile(r"\s*(?:(§§?|artikel|art|anlage|anl)\.?\s*)?(\d+)\s*([a-z]{0,2})(?![a-z])(?:/([a-z0-9]+))?\.?", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -20,13 +21,20 @@ class Unit:
     kind: str
     number: int
     suffix: str
+    sub: str = ""
 
     @property
-    def key(self) -> tuple[int, str]:
-        return self.number, self.suffix
+    def key(self) -> tuple[str, int, str, str]:
+        """sub after its parent: Anl. 1 < Anl. 1/e < Anl. 2"""
+        return self.kind, self.number, self.suffix, self.sub.casefold()
+
+    @property
+    def query(self) -> str:
+        """Abschnitt bound; RIS range covers sub-annexes of the number"""
+        return f"{self.number}{self.suffix}"
 
     def __str__(self) -> str:
-        return f"{self.kind} {self.number}{self.suffix}"
+        return f"{self.kind} {self.number}{self.suffix}" + (f"/{self.sub}" if self.sub else "")
 
 
 @dataclass(frozen=True)
@@ -43,7 +51,7 @@ class Citation:
         return self.units[:-1]
 
     def with_kind(self, kind: str) -> Citation:
-        return Citation((Unit(kind, self.last.number, self.last.suffix),), implicit=False)
+        return Citation((Unit(kind, self.last.number, self.last.suffix, self.last.sub),), implicit=False)
 
     def __str__(self) -> str:
         return " ".join(str(unit) for unit in self.units)
@@ -58,12 +66,12 @@ def parse(text: str) -> Citation | None:
         if not match or match.end() == pos:
             return None
         kind = match.group(1)
-        raw.append((_KINDS[kind.casefold()] if kind else None, int(match.group(2)), match.group(3).casefold()))
+        raw.append((_KINDS[kind.casefold()] if kind else None, int(match.group(2)), match.group(3).casefold(), match.group(4) or ""))
         pos = match.end()
-    if not raw or any(kind is None for kind, _, _ in raw[1:]):
+    if not raw or any(unit[0] is None for unit in raw[1:]):
         return None
     implicit = raw[0][0] is None
-    units = tuple(Unit(kind or "§", number, suffix) for kind, number, suffix in raw)
+    units = tuple(Unit(kind or "§", number, suffix, sub) for kind, number, suffix, sub in raw)
     return Citation(units, implicit)
 
 
@@ -73,7 +81,7 @@ def end_of_range(start: Citation, text: str) -> Citation | None:
     if end is None:
         return None
     if end.implicit and len(end.units) == 1:
-        return Citation((*start.outer, Unit(start.last.kind, end.last.number, end.last.suffix)), start.implicit)
+        return Citation((*start.outer, Unit(start.last.kind, end.last.number, end.last.suffix, end.last.sub)), start.implicit)
     return end
 
 
@@ -88,7 +96,7 @@ def select(refs: list[dict[str, Any]], start: Citation, end: Citation) -> list[d
         if not start.last.key <= label.last.key <= end.last.key:
             continue
         if start.outer:
-            if label.outer != start.outer:
+            if [unit.key for unit in label.outer] != [unit.key for unit in start.outer]:
                 continue
         elif info["transitional"]:
             continue

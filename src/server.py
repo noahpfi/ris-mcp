@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from . import config
 from . import http_app
 from . import ris_client as rc
+from . import sections
 from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
 from . import index as fts_index
 
@@ -23,7 +24,9 @@ from . import index as fts_index
 # get_paragraph fans out one upstream fetch per paragraph -> range = amplification lever, capped
 MAX_RANGE = 20
 
-_LEADING_DIGITS = re.compile(r"^\s*(\d+)")
+# range query pages; 20 numbers incl suffix variants + ÜR stay far below 300 docs
+MAX_UNIT_PAGES = 3
+CITATION_FORMS = "1295, § 879a, Art. 7, Anl. 1 or Art. 10 § 1"
 
 # CC BY 4.0 requires attribution on pass-on; only gazette wording binding -> note on response, website reaches nobody
 SOURCE_CONSOLIDATED = (
@@ -43,7 +46,8 @@ def _sourced(body: str, authentic: bool = False) -> str:
 
 
 def _expiry_note(meta: dict[str, Any]) -> str:
-    return f"  valid until {meta['valid_until']}" if meta["valid_until"] else ""
+    expiry = meta["valid_until"] or meta["repealed"]
+    return f"  valid until {expiry}" if expiry else ""
 
 
 LAW_PARAM = "Law abbreviation, short title or 8-digit Gesetzesnummer, e.g. ABGB, EStG, 10002462"
@@ -63,16 +67,6 @@ def _iso_date(text: str) -> str | None:
         return Date.fromisoformat(text.strip()).isoformat()
     except ValueError:
         return None
-
-
-def _range_span(start: str, end: str) -> int | None:
-    """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
-    if not end:
-        return None
-    lo, hi = _LEADING_DIGITS.match(start), _LEADING_DIGITS.match(end)
-    if not lo or not hi:
-        return None
-    return int(hi.group(1)) - int(lo.group(1)) + 1
 
 
 def _transport_security() -> TransportSecuritySettings | None:
@@ -150,49 +144,70 @@ async def search_law(
     return _sourced("\n".join(lines))
 
 
-@mcp.tool()
-async def get_paragraph(
-    law: Annotated[str, LAW_PARAM],
-    paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
-    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
-) -> str:
-    """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
-    span = _range_span(paragraph, to_paragraph)
-    if span is not None and span > MAX_RANGE:
+async def _units(law: str, paragraph: str, to_paragraph: str, date: str, historical: bool) -> str:
+    """shared by get_paragraph + get_paragraph_at: parse citation, resolve law, select exact labels, render"""
+    start = sections.parse(paragraph)
+    end = sections.end_of_range(start, to_paragraph) if start and to_paragraph else start
+    if start is None or end is None:
+        return f"Cannot read '{paragraph}{' to ' + to_paragraph if to_paragraph else ''}' as a citation. Use forms like {CITATION_FORMS}."
+    if end.outer != start.outer or end.last.kind != start.last.kind or end.last.key < start.last.key:
+        return f"Range {start} to {end} does not run forward within one kind of unit."
+    span = end.last.number - start.last.number + 1
+    if span > MAX_RANGE:
         return (
-            f"Range §§ {paragraph}–{to_paragraph} covers {span} paragraphs; the limit is "
+            f"Range {start} to {end} covers {span} numbers; the limit is "
             f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
         )
 
-    resolution = await _resolve(law, rc.today())
+    resolution = await _resolve(law, date)
     if isinstance(resolution, str):
         return resolution
 
-    refs, _ = await rc.search_bundesrecht(
-        gesetzesnummer=resolution.law.number,
-        abschnitt_von=paragraph,
-        abschnitt_bis=to_paragraph or paragraph,
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
-    )
-
-    if not refs:
-        return (
-            f"No version of {law} § {paragraph} in force today. "
-            "Repealed wording is reachable via get_paragraph_at."
+    picked: list[dict[str, Any]] = []
+    nearby: list[dict[str, Any]] = []
+    truncated = False
+    for kind in sections.IMPLICIT_KINDS if start.implicit else (start.last.kind,):
+        first, last = (start.with_kind(kind), end.with_kind(kind)) if start.implicit else (start, end)
+        lo, hi = first.units[0], last.units[0]
+        refs, total = await rc.search_bundesrecht_pages(
+            MAX_UNIT_PAGES,
+            gesetzesnummer=resolution.law.number,
+            abschnitt_von=f"{lo.number}{lo.suffix}",
+            abschnitt_bis=f"{hi.number}{hi.suffix}",
+            abschnitt_typ=sections.ABSCHNITT_TYP[lo.kind],
+            fassung_vom=date,
         )
+        picked = sections.select(refs, first, last)
+        nearby = nearby or refs
+        truncated = len(refs) < total
+        if picked:
+            start, end = first, last
+            break
 
-    # API may widen range past span check -> cap again, one call fans out to many fetches
-    refs = refs[:MAX_RANGE]
+    when = f"on {date}" if historical else "today"
+    wanted = f"{start}" if start == end else f"{start} to {end}"
+    if not picked:
+        lines = [f"No {wanted} in {resolution.law.short_title} in force {when}."]
+        if nearby:
+            labels = ", ".join(_label(r) for r in nearby[:MAX_RANGE])
+            lines.append(f"RIS holds near it: {labels}.")
+        if not historical:
+            lines.append("Repealed wording is reachable via get_paragraph_at.")
+        return "\n".join(lines)
 
+    parts = [rc.describe_resolution(resolution), ""]
+    if len(picked) > MAX_RANGE:
+        parts.append(f"*{len(picked)} documents match {wanted}; showing the first {MAX_RANGE}, continue after {_label(picked[MAX_RANGE - 1])}.*\n")
+        picked = picked[:MAX_RANGE]
+    if truncated:
+        parts.append(f"*RIS returned more than {MAX_UNIT_PAGES * 100} documents for this range; narrow it to see all.*\n")
+
+    as_of = f" (as of {date})" if historical else ""
     # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
-    parts: list[str] = [rc.describe_resolution(resolution), ""]
-    for ref in refs:
+    for ref in picked:
         meta = rc._meta_from_ref(ref)
-        html = await rc.fetch_document_html(ref)
-        text = html_to_markdown(html)
-        parts.append(f"### {meta['short_title']} {meta['paragraph']}")
+        text = html_to_markdown(await rc.fetch_document_html(ref))
+        parts.append(f"### {meta['short_title']} {_label(ref)}{as_of}")
         parts.append(f"*{meta['kundmachung']}*")
         parts.append(f"*In force from: {meta['in_force_from']}{_expiry_note(meta)}*")
         parts.append(f"*Document: {meta['document_id']}*")
@@ -203,48 +218,32 @@ async def get_paragraph(
     return _sourced("\n".join(parts))
 
 
+def _label(ref: dict[str, Any]) -> str:
+    meta = rc._meta_from_ref(ref)
+    return meta["paragraph"] + (" (transitional)" if meta["transitional"] else "")
+
+
+@mcp.tool()
+async def get_paragraph(
+    law: Annotated[str, LAW_PARAM],
+    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}. A bare number tries §, then Art., then Anl."],
+    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} numbers from the start"] = "",
+) -> str:
+    """Fetch the version in force today of one paragraph, article or annex, or a range of them, from an Austrian statute."""
+    return await _units(law, paragraph, to_paragraph, rc.today(), historical=False)
+
+
 @mcp.tool()
 async def get_paragraph_at(
     law: Annotated[str, LAW_PARAM],
-    paragraph: Annotated[str, "Paragraph number"],
+    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}"],
     date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
 ) -> str:
-    """Fetch the historical version of a paragraph as it read on a given date."""
+    """Fetch the historical version of a paragraph, article or annex as it read on a given date."""
     iso = _iso_date(date)
     if iso is None:
         return f"'{date}' is not a date in YYYY-MM-DD format."
-    date = iso
-    resolution = await _resolve(law, date)
-    if isinstance(resolution, str):
-        return resolution
-
-    refs, _ = await rc.search_bundesrecht(
-        gesetzesnummer=resolution.law.number,
-        abschnitt_von=paragraph,
-        abschnitt_bis=paragraph,
-        abschnitt_typ="Paragraph",
-        fassung_vom=date,
-        pro_seite="Ten",
-    )
-
-    if not refs:
-        return f"No version of {law} § {paragraph} found for date {date}."
-
-    ref = refs[0]
-    meta = rc._meta_from_ref(ref)
-    html = await rc.fetch_document_html(ref)
-    text = html_to_markdown(html)
-
-    return _sourced("\n".join([
-        rc.describe_resolution(resolution),
-        "",
-        f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
-        f"*{meta['kundmachung']}*",
-        f"*In force from: {meta['in_force_from']}*",
-        f"*Document: {meta['document_id']}*",
-        "",
-        text,
-    ]))
+    return await _units(law, paragraph, "", iso, historical=True)
 
 
 @mcp.tool()

@@ -7,61 +7,34 @@ import pytest
 from src import ris_client as rc
 from src import server
 
-
-def test_range_span_counts_plain_numbers():
-    assert server._range_span("1", "20") == 20
-    assert server._range_span("1295", "1295") == 1
-    assert server._range_span("1", "") is None
+from fake_ris import FakeRis, law
 
 
-def test_range_span_gives_up_on_suffixed_paragraphs():
-    """§ 1295a = real paragraph number; guessing span from it = wrong"""
-    assert server._range_span("1295a", "1300b") == 6
-    assert server._range_span("a", "b") is None
+@pytest.fixture
+def abgb(monkeypatch):
+    suffixed = [f"§ {n}{s}" for n in range(1, 6) for s in ("", "a", "b", "c", "d", "e")]
+    return FakeRis(law("10001622", "Allgemeines bürgerliches Gesetzbuch", "ABGB", *suffixed)).install(monkeypatch)
 
 
-async def test_wide_range_is_refused_before_any_upstream_call(monkeypatch):
-    calls = []
-
-    async def spy(**kwargs):
-        calls.append(kwargs)
-        return [], 0
-
-    monkeypatch.setattr(rc, "search_bundesrecht", spy)
-    result = await server.get_paragraph(law="ABGB", paragraph="1", to_paragraph="1500")
-
+@pytest.mark.parametrize("start, end", [("1", "1500"), ("§ 1", "§ 21"), ("Art. 1", "30")])
+async def test_wide_range_is_refused_before_any_upstream_call(abgb, start, end):
+    result = await server.get_paragraph(law="ABGB", paragraph=start, to_paragraph=end)
     assert "limit is" in result
-    assert not calls, "refused range still hit the RIS API"
+    assert not abgb.calls, "refused range still hit the RIS API"
 
 
-async def test_range_within_the_limit_is_allowed(monkeypatch):
-    async def search(**kwargs):
-        return [], 0
-
-    monkeypatch.setattr(rc, "search_bundesrecht", search)
-    result = await server.get_paragraph(law="ABGB", paragraph="1", to_paragraph="20")
+@pytest.mark.parametrize("start, end", [("1", "20"), ("1295a", "1300b")])
+async def test_range_within_the_limit_is_allowed(abgb, start, end):
+    """span counts numbers; suffixes are real units, not extra numbers"""
+    result = await server.get_paragraph(law="ABGB", paragraph=start, to_paragraph=end)
     assert "limit is" not in result
 
 
-async def test_result_fan_out_is_capped_even_if_the_api_widens_the_range(monkeypatch):
-    """RIS decides range matches; cap must not depend on its answer"""
-    ref = {"Data": {"Metadaten": {
-        "Technisch": {"ID": "d"}, "Allgemein": {"DokumentUrl": "u"},
-        "Bundesrecht": {"Kurztitel": "ABGB", "BrKons": {"ArtikelParagraphAnlage": "§ 1"}}}}}
-    fetched = []
-
-    async def search(**kwargs):
-        return [dict(ref) for _ in range(50)], 50
-
-    async def fetch(r):
-        fetched.append(r)
-        return "<html><body><p>x</p></body></html>"
-
-    monkeypatch.setattr(rc, "search_bundesrecht", search)
-    monkeypatch.setattr(rc, "fetch_document_html", fetch)
-    await server.get_paragraph(law="ABGB", paragraph="1", to_paragraph="5")
-
-    assert len(fetched) <= server.MAX_RANGE
+async def test_result_fan_out_is_capped_when_suffixes_multiply_the_range(abgb):
+    """§§ 1-5 = 5 numbers but 25 documents, 5a-5e past the end; cap must not depend on RIS answer"""
+    result = await server.get_paragraph(law="ABGB", paragraph="1", to_paragraph="5")
+    assert len(abgb.fetched) == server.MAX_RANGE
+    assert f"25 documents match § 1 to § 5; showing the first {server.MAX_RANGE}" in result
 
 
 @pytest.mark.parametrize("status", [400, 500, 503])

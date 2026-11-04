@@ -207,32 +207,30 @@ async def search_bundesrecht_pages(max_pages: int, **kwargs: Any) -> tuple[list[
     return refs, total
 
 
-async def search_bgbl_auth(
-    *,
-    bgbl_nummer: str = "",
-    suchworte: str = "",
-    titel: str = "",
-    seite: int = 1,
-    pro_seite: str = "Ten",
-) -> tuple[list[dict[str, Any]], int]:
-    params: dict[str, str] = {
-        "Applikation": "BgblAuth",
-        "Teil.SucheInTeil1": "true",
-        "Teil.SucheInTeil2": "true",
-        "Teil.SucheInTeil3": "true",
-        "Seitennummer": str(seite),
-        "DokumenteProSeite": pro_seite,
-    }
-    if bgbl_nummer:
-        params["Bgblnummer"] = bgbl_nummer
-    if suchworte:
-        params["Suchworte"] = suchworte
-    if titel:
-        params["Titel"] = titel
-
+async def search_bgbl_auth(bgbl_nummer: str, teile: tuple[int, ...] = (1, 2, 3)) -> tuple[list[dict[str, Any]], int]:
+    """number/year exists once per Teil -> 50/2023 = up to 3 gazette entries"""
+    params = {"Applikation": "BgblAuth", "Bgblnummer": bgbl_nummer, "Seitennummer": "1", "DokumenteProSeite": "Ten"}
+    for teil in teile:
+        params[f"Teil.SucheInTeil{teil}"] = "true"
     data = await _get_json(params)
-    refs, total = _extract_docs(data)
-    return refs, total
+    return _extract_docs(data)
+
+
+def bgbl_meta(ref: dict[str, Any]) -> dict[str, str]:
+    meta = ref.get("Data", {}).get("Metadaten", {})
+    bundesrecht = meta.get("Bundesrecht", {})
+    auth = bundesrecht.get("BgblAuth", {})
+    urls = ref.get("Data", {}).get("Dokumentliste", {}).get("ContentReference", {}).get("Urls", {}).get("ContentUrl", [])
+    return {
+        "id": meta.get("Technisch", {}).get("ID", ""),
+        "number": auth.get("Bgblnummer", ""),
+        "type": auth.get("Typ", ""),
+        "issued": auth.get("Ausgabedatum", ""),
+        "short_title": bundesrecht.get("Kurztitel", ""),
+        "title": bundesrecht.get("Titel", ""),
+        "url": meta.get("Allgemein", {}).get("DokumentUrl", ""),
+        "pdf": next((u["Url"] for u in urls if u.get("DataType") == "Authentisch"), ""),
+    }
 
 
 # one upstream call per page; B-VG = 63 preambles, widest real name seen -> 5 pages = 500 laws, past that name too vague

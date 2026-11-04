@@ -308,44 +308,54 @@ async def get_law_outline(
     return _sourced(f"{rc.describe_resolution(resolution)}\n\n# {meta['short_title']} — Table of Contents\n\n{outline}")
 
 
+# authentic gazette text per call, picked by feel; long amending acts run past 100k chars, link carries the rest
+BGBL_TEXT_LIMIT = 6000
+# BgblAuth starts 2004; older gazettes = scanned PDFs outside this API
+BGBL_AUTH_FROM = 2004
+_BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b")
+
+
 @mcp.tool()
 async def lookup_bgbl(
-    reference: Annotated[str, "BGBl reference, e.g. 'BGBl I Nr. 50/2023' or '50/2023'"],
+    reference: Annotated[str, "BGBl reference with Teil, e.g. 'BGBl. I Nr. 50/2023', 'II 50/2023'; without Teil all three are listed"],
 ) -> str:
-    """Look up an authentic Bundesgesetzblatt entry and return its title and amended laws."""
-    m = re.search(r"(\d+/\d+)", reference)
-    if not m:
-        return f"Could not parse BGBl number from '{reference}'. Use format like '50/2023'."
+    """Look up an authentic Bundesgesetzblatt entry and return its metadata and text."""
+    match = _BGBL.search(reference)
+    if not match:
+        return f"Could not read a BGBl number from '{reference}'. Use a form like 'BGBl. I Nr. 50/2023'."
+    teil, number, year = match.group(1), match.group(2), int(match.group(3))
+    if year < BGBL_AUTH_FROM:
+        return f"BGBl {number}/{year} predates the authentic electronic gazette, which starts in {BGBL_AUTH_FROM}."
 
-    bgbl_num = m.group(1)
-    refs, _ = await rc.search_bgbl_auth(bgbl_nummer=bgbl_num)
-
+    teile = (len(teil),) if teil else (1, 2, 3)
+    refs, _ = await rc.search_bgbl_auth(f"{number}/{year}", teile)
+    wanted = f"BGBl. {teil} Nr. {number}/{year}" if teil else f"BGBl. Nr. {number}/{year}"
     if not refs:
-        return f"BGBl Nr. {bgbl_num} not found. Note: BgblAuth only covers entries from 2004 onwards."
+        return f"{wanted} not found."
 
-    ref = refs[0]
-    meta_raw = ref.get("Data", {}).get("Metadaten", {})
-    bundesrecht = meta_raw.get("Bundesrecht", {})
-    technisch = meta_raw.get("Technisch", {})
-    allgemein = meta_raw.get("Allgemein", {})
+    if len(refs) > 1:
+        lines = [f"{wanted} exists in {len(refs)} parts of the gazette. Ask again with the Teil:"]
+        for meta in sorted((rc.bgbl_meta(ref) for ref in refs), key=lambda m: m["number"]):
+            lines.append(f"- {meta['number']} ({meta['type']}, {meta['issued']}): {meta['short_title'] or meta['title']}")
+        return "\n".join(lines)
 
-    html = await rc.fetch_document_html(ref)
-    blocks = extract_metadata_blocks(html)
-
+    meta = rc.bgbl_meta(refs[0])
+    text = html_to_markdown(await rc.fetch_document_html(refs[0]))
     lines = [
-        f"## BGBl {bgbl_num}",
-        f"**ID:** {technisch.get('ID', '')}",
-        f"**URL:** {allgemein.get('DokumentUrl', '')}",
-        f"**Titel:** {bundesrecht.get('Titel', '')}",
-        "",
+        f"## {meta['number']}",
+        f"**Titel:** {meta['title']}",
+        f"**Typ:** {meta['type']}",
+        f"**Ausgabedatum:** {meta['issued']}",
+        f"**ID:** {meta['id']}",
+        f"**URL:** {meta['url']}",
     ]
-
-    for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum"):
-        if label in blocks:
-            lines.append(f"**{label}:** {blocks[label]}")
-
-    if "Text" in blocks:
-        lines.append(f"\n### Content\n{blocks['Text'][:2000]}")
+    if meta["pdf"]:
+        lines.append(f"**Authentic PDF:** {meta['pdf']}")
+    if text:
+        cut = len(text) > BGBL_TEXT_LIMIT
+        lines.append(f"\n### Text\n{text[:BGBL_TEXT_LIMIT]}")
+        if cut:
+            lines.append(f"\n*Text cut at {BGBL_TEXT_LIMIT} of {len(text)} characters; the URL has the full entry.*")
 
     return _sourced("\n".join(lines), authentic=True)
 

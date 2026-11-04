@@ -20,13 +20,15 @@ def html_to_markdown(html: str) -> str:
             text_block = block
             break
 
-    if text_block is None:
-        # fallback: full body text
+    # BgblAuth entries = one titled block, no Text block -> walk every block
+    blocks = [text_block] if text_block is not None else tree.css("div.contentBlock")
+    if not blocks:
         body = tree.css_first("body")
         return _clean(body.text(separator="\n") if body else "")
 
     lines: list[str] = []
-    _walk_block(text_block, lines)
+    for block in blocks:
+        _walk_block(block, lines)
     return "\n".join(lines).strip()
 
 

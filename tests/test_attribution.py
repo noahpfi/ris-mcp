@@ -15,7 +15,7 @@ def ris(monkeypatch):
     fake = FakeRis(law("10001622", "Allgemeines bürgerliches Gesetzbuch", "ABGB", "§ 1295", text="Schadenersatz"))
     fake.install(monkeypatch)
 
-    async def search_bgbl(**kwargs):
+    async def search_bgbl(number, teile=(1, 2, 3)):
         return fake.docs[:1], 1
 
     monkeypatch.setattr(rc, "search_bgbl_auth", search_bgbl)

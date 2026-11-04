@@ -11,7 +11,7 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 | `get_paragraph_at` | Historical version of a paragraph, article or annex on a given date | ✓ |
 | `get_statute` | Preamble and first page of live paragraphs for a statute | ✓ |
 | `get_law_outline` | Full table of contents for a statute, grouped by section | ✓ |
-| `lookup_bgbl` | Look up a BGBl entry by number, e.g. `50/2023` | ✓ |
+| `lookup_bgbl` | Text and metadata of a BGBl entry, e.g. `BGBl. I Nr. 50/2023` | ✓ |
 | `get_amendment_timeline` | Every BGBl that amended a statute, in order | ✓ |
 | `who_mentions` | Reverse citation lookup, e.g. which provisions cite `§ 879` | self-host |
 

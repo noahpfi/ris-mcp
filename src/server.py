@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import date as Date
 from typing import Annotated, Any
 
 import anyio
@@ -43,6 +44,25 @@ def _sourced(body: str, authentic: bool = False) -> str:
 
 def _expiry_note(meta: dict[str, Any]) -> str:
     return f"  valid until {meta['valid_until']}" if meta["valid_until"] else ""
+
+
+LAW_PARAM = "Law abbreviation, short title or 8-digit Gesetzesnummer, e.g. ABGB, EStG, 10002462"
+
+
+async def _resolve(law: str, date: str) -> rc.Resolution | str:
+    """resolution, or answer text when name unresolvable"""
+    try:
+        return await rc.resolve_law(law, date)
+    except rc.LawLookupError as exc:
+        return str(exc)
+
+
+def _iso_date(text: str) -> str | None:
+    """RIS rejects non-ISO FassungVom with raw SOAP fault -> validate before asking"""
+    try:
+        return Date.fromisoformat(text.strip()).isoformat()
+    except ValueError:
+        return None
 
 
 def _range_span(start: str, end: str) -> int | None:
@@ -91,7 +111,7 @@ mcp = FastMCP(
 @mcp.tool()
 async def search_law(
     query: Annotated[str, "Full-text search terms"],
-    law: Annotated[str, "Optional law name or abbreviation to scope the search (e.g. ABGB, StGB)"] = "",
+    law: Annotated[str, f"Optional, scopes the search to one law. {LAW_PARAM}"] = "",
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
 
@@ -100,8 +120,17 @@ async def search_law(
     Prefer get_law_outline to browse a known statute's table of contents.
     Only versions in force today are searched, most recently entered into force first.
     """
+    header = ""
+    scope: dict[str, str] = {}
+    if law.strip():
+        resolution = await _resolve(law, rc.today())
+        if isinstance(resolution, str):
+            return resolution
+        header = rc.describe_resolution(resolution) + "\n"
+        scope["gesetzesnummer"] = resolution.law.number
+
     refs, total = await rc.search_bundesrecht(
-        suchworte=query, titel=law.strip(), fassung_vom=rc.today(), pro_seite="Fifty"
+        suchworte=query, fassung_vom=rc.today(), pro_seite="Fifty", **scope
     )
 
     if not refs:
@@ -109,7 +138,7 @@ async def search_law(
 
     refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["in_force_from"], reverse=True)
 
-    lines = [f"Found {total} result(s) in force today, showing {len(refs)}, newest first.\n"]
+    lines = [f"{header}Found {total} result(s) in force today, showing {len(refs)}, newest first.\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
         lines.append(f"**{meta['short_title']}** {meta['paragraph']}{_expiry_note(meta)}")
@@ -123,7 +152,7 @@ async def search_law(
 
 @mcp.tool()
 async def get_paragraph(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
+    law: Annotated[str, LAW_PARAM],
     paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
     to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
 ) -> str:
@@ -135,8 +164,12 @@ async def get_paragraph(
             f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
         )
 
+    resolution = await _resolve(law, rc.today())
+    if isinstance(resolution, str):
+        return resolution
+
     refs, _ = await rc.search_bundesrecht(
-        titel=law.strip(),
+        gesetzesnummer=resolution.law.number,
         abschnitt_von=paragraph,
         abschnitt_bis=to_paragraph or paragraph,
         abschnitt_typ="Paragraph",
@@ -154,7 +187,7 @@ async def get_paragraph(
     refs = refs[:MAX_RANGE]
 
     # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
-    parts: list[str] = []
+    parts: list[str] = [rc.describe_resolution(resolution), ""]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
         html = await rc.fetch_document_html(ref)
@@ -172,13 +205,21 @@ async def get_paragraph(
 
 @mcp.tool()
 async def get_paragraph_at(
-    law: Annotated[str, "Law name or abbreviation"],
+    law: Annotated[str, LAW_PARAM],
     paragraph: Annotated[str, "Paragraph number"],
     date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
 ) -> str:
     """Fetch the historical version of a paragraph as it read on a given date."""
+    iso = _iso_date(date)
+    if iso is None:
+        return f"'{date}' is not a date in YYYY-MM-DD format."
+    date = iso
+    resolution = await _resolve(law, date)
+    if isinstance(resolution, str):
+        return resolution
+
     refs, _ = await rc.search_bundesrecht(
-        titel=law.strip(),
+        gesetzesnummer=resolution.law.number,
         abschnitt_von=paragraph,
         abschnitt_bis=paragraph,
         abschnitt_typ="Paragraph",
@@ -195,6 +236,8 @@ async def get_paragraph_at(
     text = html_to_markdown(html)
 
     return _sourced("\n".join([
+        rc.describe_resolution(resolution),
+        "",
         f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
         f"*{meta['kundmachung']}*",
         f"*In force from: {meta['in_force_from']}*",
@@ -206,85 +249,54 @@ async def get_paragraph_at(
 
 @mcp.tool()
 async def get_statute(
-    name: Annotated[str, "Law name or abbreviation, e.g. ABGB, GmbHG"],
+    name: Annotated[str, LAW_PARAM],
 ) -> str:
-    """Fetch the preamble and first page of paragraphs for a statute."""
-    titel = name.strip()
+    """Fetch the preamble and the first live paragraphs or articles of a statute."""
+    resolution = await _resolve(name, rc.today())
+    if isinstance(resolution, str):
+        return resolution
 
-    refs_pre, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
+    preamble = resolution.law.preamble
+    blocks = extract_metadata_blocks(await rc.fetch_document_html(preamble))
+    parts = [rc.describe_resolution(resolution), "", f"# {blocks.get('Kurztitel', resolution.law.short_title)}", ""]
+    for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
+        if label in blocks:
+            parts.append(f"**{label}:** {blocks[label]}")
+    if "Änderung" in blocks:
+        amendments = blocks["Änderung"].split("\n")
+        suffix = f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""
+        parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
+    parts.append("")
+
+    # default order = document order, § 0 first, transitional provisions last
+    refs, total = await rc.search_bundesrecht(
+        gesetzesnummer=resolution.law.number, fassung_vom=rc.today(), pro_seite="Ten"
     )
+    body = [r for r in refs if rc._meta_from_ref(r)["paragraph"] != "§ 0" and not rc._meta_from_ref(r)["transitional"]]
+    if body:
+        parts.append(f"*{total} documents in force. Showing the first {len(body)}; get_law_outline lists all.*\n")
+        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in body])
+        for ref, html in zip(body, htmls):
+            parts.append(f"### {rc._meta_from_ref(ref)['paragraph']}")
+            parts.append(html_to_markdown(html))
+            parts.append("")
 
-    parts: list[str] = []
-
-    if refs_pre:
-        ref = rc.best_law_match(refs_pre, titel)
-        html = await rc.fetch_document_html(ref)
-        blocks = extract_metadata_blocks(html)
-        meta = rc._meta_from_ref(ref)
-        parts.append(f"# {blocks.get('Kurztitel', meta['short_title'])}")
-        parts.append("")
-        for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
-            if label in blocks:
-                parts.append(f"**{label}:** {blocks[label]}")
-        if "Änderung" in blocks:
-            amendments = blocks["Änderung"].split("\n")
-            suffix = f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""
-            parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
-        parts.append("")
-
-    refs_body, total = await rc.search_bundesrecht(
-        titel=titel,
-        fassung_vom=rc.today(),
-        pro_seite="Ten",
-        seite=1,
-    )
-
-    if refs_body:
-        parts.append(f"*Statute has {total} sections in force. Showing first {len(refs_body)}.*\n")
-        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs_body])
-        for ref, html in zip(refs_body, htmls):
-            meta = rc._meta_from_ref(ref)
-            if meta["doc_type"] == "Paragraph" and meta["paragraph_number"] != "0":
-                text = html_to_markdown(html)
-                parts.append(f"### {meta['paragraph']}")
-                parts.append(text)
-                parts.append("")
-
-    if not parts:
-        return f"Statute '{name}' not found."
     return _sourced("\n".join(parts))
 
 
 @mcp.tool()
 async def get_law_outline(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
+    law: Annotated[str, LAW_PARAM],
 ) -> str:
     """Return full table of contents for a statute: § numbers with their headings, grouped by section.
 
     Use this to discover which paragraph covers a topic without relying on prior knowledge.
     """
-    titel = law.strip()
-    refs, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
-    )
-    if not refs:
-        refs, _ = await rc.search_bundesrecht(titel=titel, fassung_vom=rc.today(), pro_seite="Ten")
-    if not refs:
-        return f"Law '{law}' not found."
+    resolution = await _resolve(law, rc.today())
+    if isinstance(resolution, str):
+        return resolution
 
-    ref = rc.best_law_match(refs, titel)
-    meta = rc._meta_from_ref(ref)
+    meta = rc._meta_from_ref(resolution.law.preamble)
     outline_url = meta["outline_url"]
     if not outline_url:
         return f"No outline URL for '{law}'."
@@ -294,7 +306,7 @@ async def get_law_outline(
     if not outline:
         return f"Could not parse outline for '{law}'."
 
-    return _sourced(f"# {meta['short_title']} — Table of Contents\n\n{outline}")
+    return _sourced(f"{rc.describe_resolution(resolution)}\n\n# {meta['short_title']} — Table of Contents\n\n{outline}")
 
 
 @mcp.tool()
@@ -341,35 +353,22 @@ async def lookup_bgbl(
 
 @mcp.tool()
 async def get_amendment_timeline(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB"],
+    law: Annotated[str, LAW_PARAM],
 ) -> str:
     """Return an ordered list of every BGBl amendment that touched a statute."""
-    titel = law.strip()
+    resolution = await _resolve(law, rc.today())
+    if isinstance(resolution, str):
+        return resolution
 
-    refs, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
-    )
-
-    if not refs:
-        return f"Statute '{law}' not found."
-
-    ref = rc.best_law_match(refs, titel)
-    html = await rc.fetch_document_html(ref)
-    blocks = extract_metadata_blocks(html)
-
-    short_title = blocks.get("Kurztitel", law)
+    blocks = extract_metadata_blocks(await rc.fetch_document_html(resolution.law.preamble))
+    short_title = blocks.get("Kurztitel", resolution.law.short_title)
     amendments_raw = blocks.get("Änderung", "")
 
     if not amendments_raw:
         return f"No amendment list found for {law}."
 
     amendments = [a.strip() for a in amendments_raw.split("\n") if a.strip()]
-    lines = [f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
+    lines = [rc.describe_resolution(resolution), "", f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
     for i, a in enumerate(amendments, 1):
         lines.append(f"{i}. {a}")
 

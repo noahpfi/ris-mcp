@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -151,6 +153,8 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
         "repealed": repealed,
         "valid_until": "" if repealed else expiry,
         "outline_url": brkons.get("GesamteRechtsvorschriftUrl", ""),
+        "law_number": brkons.get("Gesetzesnummer", ""),
+        "transitional": bool(brkons.get("Uebergangsrecht")),
         "doc_type": brkons.get("Dokumenttyp", ""),
         "eli": bundesrecht.get("Eli", ""),
     }
@@ -160,32 +164,46 @@ async def search_bundesrecht(
     *,
     suchworte: str = "",
     titel: str = "",
+    gesetzesnummer: str = "",
     abschnitt_von: str = "",
     abschnitt_bis: str = "",
     abschnitt_typ: str = "Paragraph",
     fassung_vom: str = "",
+    sort_by: str = "",
+    descending: bool = False,
     seite: int = 1,
     pro_seite: str = "Ten",
-    dokument_nummer: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     params: dict[str, str] = {"Applikation": "BrKons"}
     if suchworte:
         params["Suchworte"] = suchworte
     if titel:
         params["Titel"] = titel
+    if gesetzesnummer:
+        params["Gesetzesnummer"] = gesetzesnummer
     if abschnitt_von:
         params["Abschnitt.Von"] = abschnitt_von
         params["Abschnitt.Bis"] = abschnitt_bis or abschnitt_von
         params["Abschnitt.Typ"] = abschnitt_typ
     if fassung_vom:
         params["FassungVom"] = fassung_vom
-    if dokument_nummer:
-        params["Dokumentnummer"] = dokument_nummer
+    if sort_by:
+        params["Sortierung.SortedByColumn"] = sort_by
+        params["Sortierung.SortDirection"] = "Descending" if descending else "Ascending"
     params["Seitennummer"] = str(seite)
     params["DokumenteProSeite"] = pro_seite
 
     data = await _get_json(params)
     refs, total = _extract_docs(data)
+    return refs, total
+
+
+async def search_bundesrecht_pages(max_pages: int, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
+    """every page up to max_pages at RIS max page size; caller compares len(refs) to total for truncation"""
+    refs, total = await search_bundesrecht(seite=1, pro_seite="OneHundred", **kwargs)
+    for page in range(2, min(math.ceil(total / 100), max_pages) + 1):
+        more, _ = await search_bundesrecht(seite=page, pro_seite="OneHundred", **kwargs)
+        refs.extend(more)
     return refs, total
 
 
@@ -217,29 +235,106 @@ async def search_bgbl_auth(
     return refs, total
 
 
-def best_law_match(refs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
-    """best abbreviation/short-title match, live laws preferred"""
-    if not refs:
-        return None
-    live = [r for r in refs if not _meta_from_ref(r)["repealed"]]
-    pool = live if live else refs
-    q = query.strip().upper()
-    # drop trailing year -> "UStG" matches "UStG 1994"
-    q_base = re.sub(r'\s*\d{4}\s*$', '', q).strip()
-    for ref in pool:
-        m = _meta_from_ref(ref)
-        if m["abbreviation"].upper() == q:
-            return ref
-    for ref in pool:
-        m = _meta_from_ref(ref)
-        abbr_base = re.sub(r'\s*\d{4}\s*$', '', m["abbreviation"]).upper().strip()
-        if abbr_base == q_base and q_base:
-            return ref
-    for ref in pool:
-        m = _meta_from_ref(ref)
-        if m["short_title"].upper() == q:
-            return ref
-    return pool[0]
+# one upstream call per page; B-VG = 63 preambles, widest real name seen -> 5 pages = 500 laws, past that name too vague
+MAX_RESOLVE_PAGES = 5
+AMBIGUITY_LISTED = 25
+_GESETZESNUMMER = re.compile(r"\d{8}")
+_TRAILING_YEAR = re.compile(r"\s+\d{4}$")
+
+
+class LawLookupError(Exception):
+    """message = tool answer, name unresolvable or ambiguous"""
+
+
+@dataclass(frozen=True)
+class Law:
+    number: str
+    abbreviation: str
+    short_title: str
+    preamble: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Resolution:
+    law: Law
+    related: tuple[Law, ...]
+
+
+def _tidy(text: str) -> str:
+    return " ".join(text.replace("\xa0", " ").split())
+
+
+def _norm(text: str) -> str:
+    return _tidy(text).casefold()
+
+
+def _undated(text: str) -> str:
+    return _TRAILING_YEAR.sub("", text)
+
+
+async def resolve_law(name: str, date: str) -> Resolution:
+    """name -> one Gesetzesnummer; Titel = substring search over titles + abbreviations, never queried directly"""
+    query = _norm(name)
+    if not query:
+        raise LawLookupError("No law given.")
+    by_number = bool(_GESETZESNUMMER.fullmatch(query))
+    refs, total = await search_bundesrecht_pages(
+        MAX_RESOLVE_PAGES,
+        **({"gesetzesnummer": query} if by_number else {"titel": name.strip()}),
+        abschnitt_von="0",
+        abschnitt_typ="Paragraph",
+        fassung_vom=date,
+    )
+    if len(refs) < total:
+        raise LawLookupError(
+            f"'{name}' matches {total} laws. Use the abbreviation, the full short title or the Gesetzesnummer."
+        )
+
+    laws: dict[str, Law] = {}
+    for ref in refs:
+        meta = _meta_from_ref(ref)
+        if meta["paragraph"] == "§ 0" and meta["law_number"] not in laws:
+            laws[meta["law_number"]] = Law(meta["law_number"], _tidy(meta["abbreviation"]), _tidy(meta["short_title"]), ref)
+    if not laws:
+        when = "today" if date == today() else f"on {date}"
+        raise LawLookupError(f"No law matching '{name}' in force {when}.")
+    candidates = list(laws.values())
+    if by_number:
+        return Resolution(candidates[0], ())
+
+    # abbreviation before title, exact before omitted year; year only stripped law-side -> "UStG 1972" never hits UStG 1994
+    # shared abbreviation -> main act = shortest title, rest related
+    tiers = (
+        lambda law: _norm(law.abbreviation) == query,
+        lambda law: _undated(_norm(law.abbreviation)) == query,
+        lambda law: _norm(law.short_title) == query,
+        lambda law: _undated(_norm(law.short_title)) == query,
+    )
+    for matches in tiers:
+        hits = sorted((law for law in candidates if matches(law)), key=lambda law: (len(law.short_title), law.number))
+        if hits:
+            return Resolution(hits[0], tuple(hits[1:]))
+    if len(candidates) == 1:
+        return Resolution(candidates[0], ())
+
+    listing = "\n".join(f"- {_describe(law)}" for law in candidates[:AMBIGUITY_LISTED])
+    if len(candidates) > AMBIGUITY_LISTED:
+        listing += f"\n- … {len(candidates) - AMBIGUITY_LISTED} more"
+    raise LawLookupError(f"'{name}' matches {len(candidates)} laws, name one by abbreviation or Gesetzesnummer:\n{listing}")
+
+
+def _describe(law: Law) -> str:
+    abbreviation = f"{law.abbreviation}, " if law.abbreviation else ""
+    return f"{law.short_title} ({abbreviation}Gesetzesnummer {law.number})"
+
+
+def describe_resolution(resolution: Resolution) -> str:
+    """header naming resolved law, shared-abbreviation siblings reachable via their Gesetzesnummer"""
+    lines = [f"*Law: {_describe(resolution.law)}*"]
+    if resolution.related:
+        others = "; ".join(_describe(law) for law in resolution.related)
+        lines.append(f"*Same abbreviation, not included: {others}*")
+    return "\n".join(lines)
 
 
 async def fetch_document_html(ref: dict[str, Any]) -> str:

@@ -6,6 +6,8 @@ import pytest
 from src import ris_client as rc
 from src import server
 
+from fake_ris import FakeRis, ref
+
 
 def _ref(paragraph: str = "§ 6", in_force: str = "2026-01-01", expiry: str = "", title: str = "UStG 1994") -> dict:
     return {"Data": {"Metadaten": {
@@ -41,13 +43,6 @@ def test_expiry_today_is_still_live(monkeypatch):
 def test_no_expiry_is_live():
     meta = rc._meta_from_ref(_ref())
     assert meta["repealed"] == "" and meta["valid_until"] == ""
-
-
-def test_best_law_match_keeps_law_with_scheduled_expiry(monkeypatch):
-    monkeypatch.setattr(rc, "today", lambda: "2026-09-30")
-    old = _ref(expiry="1994-12-31", title="UStG 1972")
-    scheduled = _ref(expiry="2026-12-31", title="UStG 1994")
-    assert rc.best_law_match([old, scheduled], "UStG") is scheduled
 
 
 LIVE_LOOKUPS = [
@@ -89,16 +84,13 @@ async def test_get_paragraph_at_keeps_requested_date(monkeypatch):
 
 
 async def test_search_law_lists_newest_in_force_first_with_scheduled_expiry(monkeypatch):
-    refs = [
-        _ref(paragraph="§ 21", in_force="2025-01-01", expiry="2026-12-31"),
-        _ref(paragraph="§ 6", in_force="2026-01-01"),
-        _ref(paragraph="Art. 1", in_force="2023-07-22", title="UStG 1994 Anhang"),
-    ]
-
-    async def search(**kwargs):
-        return refs, len(refs)
-
-    monkeypatch.setattr(rc, "search_bundesrecht", search)
+    ustg = dict(law="10004873", title="Umsatzsteuergesetz 1994", abbreviation="UStG 1994", text="Kleinunternehmer")
+    FakeRis([
+        ref("§ 0", **ustg),
+        ref("§ 21", in_force="2025-01-01", expiry="2026-12-31", **ustg),
+        ref("§ 6", in_force="2026-01-01", **ustg),
+        ref("Art. 1", in_force="2023-07-22", **ustg),
+    ]).install(monkeypatch)
     monkeypatch.setattr(rc, "today", lambda: "2026-09-30")
     out = await server.search_law(query="Kleinunternehmer", law="UStG")
 

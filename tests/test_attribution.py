@@ -6,37 +6,19 @@ import pytest
 from src import ris_client as rc
 from src import server
 
-
-def _ref(**brkons):
-    base = {
-        "ArtikelParagraphAnlage": "§ 1295",
-        "Kundmachungsorgan": "JGS Nr. 946/1811",
-        "Inkrafttretensdatum": "1979-01-01",
-        "Dokumenttyp": "Paragraph",
-        "Paragraphnummer": "1295",
-        "GesamteRechtsvorschriftUrl": "https://example.invalid/outline",
-    }
-    base.update(brkons)
-    return {"Data": {"Metadaten": {
-        "Technisch": {"ID": "NOR12345678"},
-        "Allgemein": {"DokumentUrl": "https://example.invalid/doc"},
-        "Bundesrecht": {"Kurztitel": "ABGB", "Abkuerzung": "ABGB", "BrKons": base},
-    }}}
+from fake_ris import FakeRis, law
 
 
 @pytest.fixture
 def ris(monkeypatch):
-    """every upstream call answered locally with one plausible paragraph"""
-    async def search(**kwargs):
-        return [_ref()], 1
+    """every upstream call answered locally"""
+    fake = FakeRis(law("10001622", "Allgemeines bürgerliches Gesetzbuch", "ABGB", "§ 1295", text="Schadenersatz"))
+    fake.install(monkeypatch)
 
-    async def fetch(ref):
-        return "<html><body><div class='contentBlock'><h1 class='Titel'>Text</h1>" \
-               "<p>Wer einem anderen einen Schaden zufügt...</p></div></body></html>"
+    async def search_bgbl(**kwargs):
+        return fake.docs[:1], 1
 
-    monkeypatch.setattr(rc, "search_bundesrecht", search)
-    monkeypatch.setattr(rc, "search_bgbl_auth", search)
-    monkeypatch.setattr(rc, "fetch_document_html", fetch)
+    monkeypatch.setattr(rc, "search_bgbl_auth", search_bgbl)
     monkeypatch.setattr(rc, "_get_html", lambda url: _outline_html())
 
 

@@ -66,69 +66,50 @@ def _clean(text: str) -> str:
 
 
 def parse_law_outline(html: str) -> str:
-    """Parse paragraph TOC from a GesamteRechtsvorschrift page."""
-    tree = HTMLParser(html)
-    lines: list[str] = []
-    current_section: str | None = None
-    last_printed_section: str | None = None
-    seen_entries: set[str] = set()
-
-    for block in tree.css("div.contentBlock"):
-        g1 = block.css_first("h4.UeberschrG1, h4.UeberschrG1-AfterG2")
-        if g1:
-            current_section = _clean(g1.text(separator=" "))
-
-        raw = block.text(separator=" ")
-        heading = block.css_first("h4.UeberschrPara")
-        m_par = re.search(r"§\s*(\d+)", raw)
-        if heading and m_par:
-            entry = f"§{m_par.group(1)}"
-            if entry in seen_entries:
-                continue
-            seen_entries.add(entry)
-            if current_section != last_printed_section:
-                if lines:
-                    lines.append("")
-                lines.append(f"**{current_section or ''}**")
-                last_printed_section = current_section
-            lines.append(f"§ {int(m_par.group(1)):>4}  {heading.text(strip=True)}")
-            continue
-
-        gld = block.css_first("h5.GldSymbol")
-        m_art = re.search(r"Artikel\s+(\d+)", raw) if gld else None
-        if gld and m_art:
-            entry = f"Art{m_art.group(1)}"
-            if entry in seen_entries:
-                continue
-            seen_entries.add(entry)
-            if current_section != last_printed_section:
-                if lines:
-                    lines.append("")
-                lines.append(f"**{current_section or ''}**")
-                last_printed_section = current_section
-            sub = block.css_first("h4.UeberschrArt")
-            title = sub.text(strip=True) if sub else ""
-            lines.append(f"Art. {int(m_art.group(1)):>3}  {title}")
-
-    return "\n".join(lines) if lines else ""
-
-
-def extract_amendment_list(html: str) -> list[str]:
-    """Pull the Änderung list from a preamble (§ 0) document."""
+    """one line per document of a GeltendeFassung page, sections as bold lines, document order kept"""
     tree = HTMLParser(html)
     for node in tree.css("span.sr-only"):
         node.decompose()
 
+    lines: list[str] = []
     for block in tree.css("div.contentBlock"):
-        header = block.css_first("h1.Titel")
-        if header and "nderung" in header.text():
-            items = []
-            for p in block.css("p"):
-                t = p.text(strip=True)
-                if t:
-                    items.append(t)
-            return items
-    return []
+        sections: list[str] = []
+        label = heading = ""
+        for node in block.css("h1, h2, h3, h4, h5, h6"):
+            kind = _outline_role(node)
+            text = _clean(node.text(separator=" "))
+            if not kind or not text:
+                continue
+            # G headings after label = annex inner structure, not law sections
+            if kind == "section" and not label:
+                sections.append(text)
+            elif kind == "label" and not label:
+                label = _outline_label(text)
+            elif kind == "heading" and not heading:
+                heading = text
+        if sections:
+            lines.extend(["", f"**{' / '.join(sections)}**"])
+        entry = f"{label}  {heading}".strip()
+        if entry:
+            lines.append(entry)
+    return "\n".join(lines).strip()
+
+
+_ROLES = {"GldSymbol": "label", "Anlagenbez": "label", "UeberschrPara": "heading", "UeberschrArt": "heading"}
+
+
+def _outline_role(node) -> str:
+    for cls in (node.attributes.get("class") or "").split():
+        if cls in _ROLES:
+            return _ROLES[cls]
+        if cls.startswith("UeberschrG"):
+            return "section"
+    return ""
+
+
+def _outline_label(text: str) -> str:
+    """'Artikel 8a.' -> 'Art. 8a', '§ 1.' -> '§ 1'"""
+    return re.sub(r"^Artikel\b", "Art.", text).rstrip(".").strip()
 
 
 def extract_metadata_blocks(html: str) -> dict[str, str]:

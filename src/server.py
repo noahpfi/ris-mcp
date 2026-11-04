@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from datetime import date as Date
 from typing import Annotated, Any
@@ -102,18 +103,25 @@ mcp = FastMCP(
 )
 
 
+SEARCH_PAGE_SIZE = 50
+
+
 @mcp.tool()
 async def search_law(
     query: Annotated[str, "Full-text search terms"],
     law: Annotated[str, f"Optional, scopes the search to one law. {LAW_PARAM}"] = "",
+    page: Annotated[int, f"Result page, {SEARCH_PAGE_SIZE} hits each"] = 1,
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
 
     Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
     text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
     Prefer get_law_outline to browse a known statute's table of contents.
-    Only versions in force today are searched, most recently entered into force first.
+    Only versions in force today are searched. RIS has no relevance ranking; hits come most
+    recently entered into force first, across all pages.
     """
+    if page < 1:
+        return "page starts at 1."
     header = ""
     scope: dict[str, str] = {}
     if law.strip():
@@ -123,19 +131,27 @@ async def search_law(
         header = rc.describe_resolution(resolution) + "\n"
         scope["gesetzesnummer"] = resolution.law.number
 
+    # sorted by RIS over all hits; sorting one page locally = arbitrary 50 hits in date order
     refs, total = await rc.search_bundesrecht(
-        suchworte=query, fassung_vom=rc.today(), pro_seite="Fifty", **scope
+        suchworte=query,
+        fassung_vom=rc.today(),
+        sort_by="Inkrafttretensdatum",
+        descending=True,
+        seite=page,
+        pro_seite="Fifty",
+        **scope,
     )
-
+    pages = math.ceil(total / SEARCH_PAGE_SIZE)
     if not refs:
+        if total:
+            return f"Page {page} is past the last page, {pages}."
         return "No results in force today. Repealed wording is reachable via get_paragraph_at."
 
-    refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["in_force_from"], reverse=True)
-
-    lines = [f"{header}Found {total} result(s) in force today, showing {len(refs)}, newest first.\n"]
+    more = f" Next: page={page + 1}." if page < pages else ""
+    lines = [f"{header}Found {total} result(s) in force today, newest in force first. Page {page} of {pages}.{more}\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
-        lines.append(f"**{meta['short_title']}** {meta['paragraph']}{_expiry_note(meta)}")
+        lines.append(f"**{meta['short_title']}** {_label(ref)}{_expiry_note(meta)}")
         lines.append(f"  Document: {meta['document_id']}")
         lines.append(f"  In force: {meta['in_force_from']}")
         lines.append(f"  URL: {meta['doc_url']}")

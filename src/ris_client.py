@@ -260,16 +260,16 @@ def bgbl_meta(ref: dict[str, Any]) -> dict[str, str]:
     }
 
 
-# Each page is one upstream call. B-VG is the widest real name seen and matches 63 preambles; five pages hold
-# 500 laws, and a name matching more is too vague to resolve.
+# Each page is one upstream call. B-VG is the widest real name seen and matches 64 preambles; five pages hold
+# 500 laws, and a name matching more is too vague to list.
 MAX_RESOLVE_PAGES = 5
-AMBIGUITY_LISTED = 25
-_GESETZESNUMMER = re.compile(r"\d{8}")
+# RIS refuses a wildcard with fewer than 3 characters next to it.
+WILDCARD_MIN = 3
 _TRAILING_YEAR = re.compile(r"\s+\d{4}$")
 
 
 class LawLookupError(Exception):
-    """Raised when a law name matches nothing or several laws. The message is the answer the tool returns."""
+    """Raised when a law name does not lead to one law. The message is the answer the tool returns."""
 
 
 @dataclass(frozen=True)
@@ -282,10 +282,12 @@ class Law:
 
 @dataclass(frozen=True)
 class Resolution:
-    """The law a name resolved to, plus laws in the same match tier, which share its abbreviation or title."""
+    """The law used, the reason code gives for it, the Titel sent to RIS and every other law RIS returned."""
 
     law: Law
-    related: tuple[Law, ...]
+    reason: str
+    sent: str
+    others: tuple[Law, ...]
 
 
 def _tidy(text: str) -> str:
@@ -300,75 +302,102 @@ def _undated(text: str) -> str:
     return _TRAILING_YEAR.sub("", text)
 
 
-async def resolve_law(name: str, date: str) -> Resolution:
-    """Resolves a law name, abbreviation or Gesetzesnummer to one law in force on the given date.
+def _wildcarded(name: str) -> str:
+    """Appends * to each word long enough for RIS to accept it, so partial words such as Einkommensteuer match."""
+    return " ".join(
+        word if word.endswith("*") or len(word) < WILDCARD_MIN else f"{word}*" for word in _tidy(name).split()
+    )
 
-    1. Fetch the § 0 preamble documents that match, since every law has exactly one. RIS Titel is a substring
-       search over titles and abbreviations, so regulations that cite a law in their title match its name too.
-    2. Keep one candidate per Gesetzesnummer. A Gesetzesnummer query returns its law directly.
-    3. Pick by tier: exact abbreviation, abbreviation without its trailing year, exact short title, short title
-       without its year. The year is stripped only on the law side, so "UStG 1972" never resolves to UStG 1994.
-       Within a tier the shortest title is the main act, and the rest are listed as related.
-    4. A lone candidate is returned as is. Otherwise the error lists the candidates.
+
+def _exact_rule(law: Law, query: str) -> tuple[str, bool] | None:
+    """The field by which law carries the name query and whether a trailing year was ignored, or None.
+    Stricter matches come first."""
+    for undated in (False, True):
+        for field, value in (("abbreviation", law.abbreviation), ("short title", law.short_title)):
+            if value and (_undated(_norm(value)) if undated else _norm(value)) == query:
+                return field, undated
+    return None
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _when(date: str) -> str:
+    return "today" if date == today() else f"on {date}"
+
+
+async def resolve_law(name: str, date: str, pick: str = "") -> Resolution:
+    """Leads a law name to one law in force on date, by letting RIS search for it.
+
+    1. Send the name to RIS as Titel, with wildcards on long words, restricted to § 0 preambles in force on
+       date. Titel is a whole-word search over title, short title and abbreviation, and every law has exactly
+       one preamble, so each hit is one law.
+    2. A pick names one of these hits by Gesetzesnummer. A number that is not among them leads nowhere, so a
+       stale number from memory gets the current list back.
+    3. Without a pick, a law is used only when it is the single hit whose abbreviation or short title equals
+       the name, a trailing year aside. Any other outcome lists every hit for the caller to pick from.
     """
     query = _norm(name)
     if not query:
         raise LawLookupError("No law given.")
-    by_number = bool(_GESETZESNUMMER.fullmatch(query))
+    if query.isdigit():
+        raise LawLookupError(f"'{name}' is a number. Pass the law's name or abbreviation; a Gesetzesnummer goes in pick.")
+    sent = _wildcarded(name)
     refs, total = await search_bundesrecht_pages(
-        MAX_RESOLVE_PAGES,
-        **({"gesetzesnummer": query} if by_number else {"titel": name.strip()}),
-        abschnitt_von="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=date,
+        MAX_RESOLVE_PAGES, titel=sent, abschnitt_von="0", abschnitt_typ="Paragraph", fassung_vom=date
     )
+    when = _when(date)
     if len(refs) < total:
         raise LawLookupError(
-            f"'{name}' matches {total} laws. Use the abbreviation, the full short title or the Gesetzesnummer."
+            f"RIS returned {_count(total, 'law')} in force {when} for '{sent}', more than the {len(refs)} this tool lists. "
+            "Use more of the law's name."
         )
 
     laws: dict[str, Law] = {}
     for ref in refs:
         meta = _meta_from_ref(ref)
-        if meta["paragraph"] == "§ 0" and meta["law_number"] not in laws:
-            laws[meta["law_number"]] = Law(meta["law_number"], _tidy(meta["abbreviation"]), _tidy(meta["short_title"]), ref)
+        laws.setdefault(meta["law_number"], Law(meta["law_number"], _tidy(meta["abbreviation"]), _tidy(meta["short_title"]), ref))
     if not laws:
-        when = "today" if date == today() else f"on {date}"
-        raise LawLookupError(f"No law matching '{name}' in force {when}.")
-    candidates = list(laws.values())
-    if by_number:
-        return Resolution(candidates[0], ())
+        raise LawLookupError(
+            f"RIS found no law in force {when} for '{sent}'. RIS matches whole words of title, short title and abbreviation."
+        )
 
-    tiers = (
-        lambda law: _norm(law.abbreviation) == query,
-        lambda law: _undated(_norm(law.abbreviation)) == query,
-        lambda law: _norm(law.short_title) == query,
-        lambda law: _undated(_norm(law.short_title)) == query,
-    )
-    for matches in tiers:
-        hits = sorted((law for law in candidates if matches(law)), key=lambda law: (len(law.short_title), law.number))
-        if hits:
-            return Resolution(hits[0], tuple(hits[1:]))
-    if len(candidates) == 1:
-        return Resolution(candidates[0], ())
-
-    listing = "\n".join(f"- {_describe(law)}" for law in candidates[:AMBIGUITY_LISTED])
-    if len(candidates) > AMBIGUITY_LISTED:
-        listing += f"\n- … {len(candidates) - AMBIGUITY_LISTED} more"
-    raise LawLookupError(f"'{name}' matches {len(candidates)} laws, name one by abbreviation or Gesetzesnummer:\n{listing}")
+    rules = {number: _exact_rule(law, query) for number, law in laws.items()}
+    ordered = sorted(laws.values(), key=lambda law: (not rules[law.number], law.short_title, law.number))
+    pick = pick.strip()
+    if pick in laws:
+        return Resolution(laws[pick], f"Picked by Gesetzesnummer {pick}.", sent, ())
+    exact = [law for law in ordered if rules[law.number]]
+    if pick or len(exact) != 1:
+        head = f"Gesetzesnummer {pick} is not among them. " if pick else ""
+        listing = "\n".join(f"- {_describe(law)}" for law in ordered)
+        raise LawLookupError(
+            f"RIS returned {_count(len(laws), 'law')} in force {when} for '{sent}'; {len(exact)} named exactly '{_tidy(name)}'. "
+            f"{head}Call again with pick=<Gesetzesnummer>:\n{listing}"
+        )
+    chosen = exact[0]
+    field, undated = rules[chosen.number]
+    reason = f"Only hit whose {field} equals '{_tidy(name)}'" + (", ignoring a trailing year." if undated else ".")
+    return Resolution(chosen, reason, sent, tuple(law for law in ordered if law is not chosen))
 
 
 def _describe(law: Law) -> str:
-    abbreviation = f"{law.abbreviation}, " if law.abbreviation else ""
-    return f"{law.short_title} ({abbreviation}Gesetzesnummer {law.number})"
+    abbreviation = f" ({law.abbreviation})" if law.abbreviation else ""
+    return f"{law.short_title}{abbreviation}: {law.number}"
 
 
 def describe_resolution(resolution: Resolution) -> str:
-    """Header naming the resolved law and the related laws, which stay reachable by their Gesetzesnummer."""
-    lines = [f"*Law: {_describe(resolution.law)}*"]
-    if resolution.related:
-        others = "; ".join(_describe(law) for law in resolution.related)
-        lines.append(f"*Same abbreviation, not included: {others}*")
+    """Header naming the law used, the reason and every other hit, so the caller can see a wrong choice."""
+    law = resolution.law
+    abbreviation = f" ({law.abbreviation})" if law.abbreviation else ""
+    lines = [f"*Law used: {law.short_title}{abbreviation}, Gesetzesnummer {law.number}. {resolution.reason}*"]
+    if resolution.others:
+        lines.append(
+            f"*RIS returned {_count(len(resolution.others), 'other law')} for '{resolution.sent}'; "
+            "to use one, call again with pick=<Gesetzesnummer>:*"
+        )
+        lines.extend(f"- {_describe(other)}" for other in resolution.others)
     return "\n".join(lines)
 
 

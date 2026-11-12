@@ -6,8 +6,7 @@ gsap.registerPlugin(ScrollTrigger)
 
 const TOOLS = [
   { name: 'search_law', desc: 'full-text keyword search across Bundesrecht' },
-  { name: 'get_paragraph', desc: 'fetch § or a range, e.g. §§ 200–210 UGB' },
-  { name: 'get_paragraph_at', desc: 'historical version of a § on a given date' },
+  { name: 'get_paragraph', desc: 'fetch § or a range, e.g. §§ 200–210 UGB, today or on any date' },
   { name: 'get_statute', desc: 'preamble + first paragraphs of a statute' },
   { name: 'get_law_outline', desc: 'full table of contents with § headings' },
   { name: 'lookup_bgbl', desc: 'Bundesgesetzblatt entry by number' },

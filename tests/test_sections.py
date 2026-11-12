@@ -50,4 +50,4 @@ async def test_reversed_range_is_refused(no_upstream):
 
 
 async def test_invalid_date_is_rejected(no_upstream):
-    assert "YYYY-MM-DD" in await server.get_paragraph_at(law="EStG", paragraph="1", date="garbage")
+    assert "YYYY-MM-DD" in await server.get_paragraph(law="EStG", paragraph="1", date="garbage")

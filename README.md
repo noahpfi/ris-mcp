@@ -6,10 +6,9 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 
 | Tool | Purpose | Hosted |
 |---|---|---|
-| `search_law` | Full-text search across Bundesrecht in force today, newest first | ✓ |
-| `get_paragraph` | Fetch a paragraph, article or annex, or a range such as §§ 200–210 UGB, live version only | ✓ |
-| `get_paragraph_at` | Historical version of a paragraph, article or annex on a given date | ✓ |
-| `get_statute` | Preamble and first page of live paragraphs for a statute | ✓ |
+| `search_law` | Full-text search across Bundesrecht in force on a date, newest first | ✓ |
+| `get_paragraph` | Fetch a paragraph, article or annex, or a range such as §§ 200–210 UGB, as in force on a date | ✓ |
+| `get_statute` | Preamble and first paragraphs of a statute | ✓ |
 | `get_law_outline` | Full table of contents for a statute, grouped by section | ✓ |
 | `lookup_bgbl` | Text and metadata of a BGBl entry, e.g. `BGBl. I Nr. 50/2023` | ✓ |
 | `get_amendment_timeline` | Every BGBl that amended a statute, in order | ✓ |

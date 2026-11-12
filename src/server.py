@@ -54,19 +54,34 @@ def _expiry_note(meta: dict[str, Any]) -> str:
     return f"  valid until {expiry}" if expiry else ""
 
 
-LAW_PARAM = "Law abbreviation, short title or 8-digit Gesetzesnummer, e.g. ABGB, EStG, 10002462"
+LAW_PARAM = (
+    "Name, short title or abbreviation of the law, e.g. ABGB, EStG, Konsumentenschutzgesetz. RIS matches whole "
+    "words; the server adds * to words of 3 or more characters."
+)
+PICK_PARAM = (
+    "Gesetzesnummer copied from this tool's own list, nothing else. RIS reuses numbers, one number can mean "
+    "multiple documents. A number from memory can therefore point to a different or repealed law. Leave pick "
+    "empty and read the list instead."
+)
+DATE_PARAM = "Date in YYYY-MM-DD format; the law is read as in force on that date. Empty means today."
 
 
-async def _resolve(law: str, date: str) -> rc.Resolution | str:
-    """Returns the resolution, or the text to answer with when the name does not resolve to one law."""
+async def _resolve(law: str, pick: str, date: str) -> rc.Resolution | str:
+    """Returns the resolution, or the text to answer with when the name does not lead to one law."""
     try:
-        return await rc.resolve_law(law, date)
+        return await rc.resolve_law(law, date, pick)
     except rc.LawLookupError as exc:
         return str(exc)
 
 
+DATE_ERROR = "'{}' is not a date in YYYY-MM-DD format."
+
+
 def _iso_date(text: str) -> str | None:
-    """Normalises a YYYY-MM-DD date or returns None. RIS answers any other FassungVom with a raw SOAP fault."""
+    """Normalises a YYYY-MM-DD date, empty meaning today, or returns None. RIS answers any other FassungVom with
+    a SOAP fault."""
+    if not text.strip():
+        return rc.today()
     try:
         return Date.fromisoformat(text.strip()).isoformat()
     except ValueError:
@@ -116,13 +131,15 @@ async def search_law(
     query: Annotated[str, "Full-text search terms"],
     law: Annotated[str, f"Optional, scopes the search to one law. {LAW_PARAM}"] = "",
     page: Annotated[int, f"Result page, {SEARCH_PAGE_SIZE} hits each"] = 1,
+    pick: Annotated[str, PICK_PARAM] = "",
+    date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
 
     Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
     text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
     Prefer get_law_outline to browse a known statute's table of contents.
-    Only versions in force today are searched. RIS has no relevance ranking; hits come most
+    Only versions in force on the date are searched, today by default. RIS has no relevance ranking; hits come most
     recently entered into force first, across all pages.
     """
     # Resolves the optional law to a Gesetzesnummer, then lets RIS sort all hits by entry into force and
@@ -130,10 +147,13 @@ async def search_law(
     # arbitrary 50 hits in date order.
     if page < 1:
         return "page starts at 1."
+    date = _iso_date(date)
+    if date is None:
+        return DATE_ERROR.format(date)
     header = ""
     scope: dict[str, str] = {}
     if law.strip():
-        resolution = await _resolve(law, rc.today())
+        resolution = await _resolve(law, pick, date)
         if isinstance(resolution, str):
             return resolution
         header = rc.describe_resolution(resolution) + "\n"
@@ -141,7 +161,7 @@ async def search_law(
 
     refs, total = await rc.search_bundesrecht(
         suchworte=query,
-        fassung_vom=rc.today(),
+        fassung_vom=date,
         sort_by="Inkrafttretensdatum",
         descending=True,
         seite=page,
@@ -150,10 +170,10 @@ async def search_law(
     )
     pages = math.ceil(total / SEARCH_PAGE_SIZE)
     if not refs:
-        return f"RIS found 0 documents for '{query}' in force today."
+        return f"RIS found 0 documents for '{query}' in force {rc._when(date)}."
 
     more = f" Next: page={page + 1}." if page < pages else ""
-    lines = [f"{header}Found {total} result(s) in force today, newest in force first. Page {page} of {pages}.{more}\n"]
+    lines = [f"{header}Found {total} result(s) in force {rc._when(date)}, newest in force first. Page {page} of {pages}.{more}\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
         lines.append(f"**{meta['short_title']}** {_label(ref)}{_expiry_note(meta)}")
@@ -165,8 +185,8 @@ async def search_law(
     return _sourced("\n".join(lines))
 
 
-async def _units(law: str, paragraph: str, to_paragraph: str, date: str, historical: bool) -> str:
-    """Serves get_paragraph and get_paragraph_at.
+async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: str) -> str:
+    """Serves get_paragraph.
 
     1. Parse the citation and range, and refuse ranges wider than MAX_RANGE numbers before any upstream call.
     2. Resolve the law to its Gesetzesnummer.
@@ -188,7 +208,7 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
             f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
         )
 
-    resolution = await _resolve(law, date)
+    resolution = await _resolve(law, pick, date)
     if isinstance(resolution, str):
         return resolution
 
@@ -213,15 +233,15 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
             start, end = first, last
             break
 
-    when = f"on {date}" if historical else "today"
+    when = rc._when(date)
     wanted = f"{start}" if start == end else f"{start} to {end}"
     if not picked:
         lines = [f"No {wanted} in {resolution.law.short_title} in force {when}."]
         if nearby:
             labels = ", ".join(_label(r) for r in nearby[:MAX_RANGE])
             lines.append(f"RIS holds near it: {labels}.")
-        if not historical:
-            lines.append("Repealed wording is reachable via get_paragraph_at.")
+        if date == rc.today():
+            lines.append("Earlier wording is reachable with the date field.")
         return "\n".join(lines)
 
     parts = [rc.describe_resolution(resolution), ""]
@@ -231,7 +251,7 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
     if truncated:
         parts.append(f"*RIS returned more than {MAX_UNIT_PAGES * 100} documents for this range; narrow it to see all.*\n")
 
-    as_of = f" (as of {date})" if historical else ""
+    as_of = "" if date == rc.today() else f" (as of {date})"
     # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff in _get_html then pushes a
     # 15-paragraph range past 60 seconds.
     for ref in picked:
@@ -259,30 +279,27 @@ async def get_paragraph(
     law: Annotated[str, LAW_PARAM],
     paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}. A bare number tries §, then Art., then Anl."],
     to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} numbers from the start"] = "",
+    pick: Annotated[str, PICK_PARAM] = "",
+    date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
-    """Fetch the version in force today of one paragraph, article or annex, or a range of them, from an Austrian statute."""
-    return await _units(law, paragraph, to_paragraph, rc.today(), historical=False)
-
-
-@mcp.tool()
-async def get_paragraph_at(
-    law: Annotated[str, LAW_PARAM],
-    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}"],
-    date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
-) -> str:
-    """Fetch the historical version of a paragraph, article or annex as it read on a given date."""
+    """Fetch one paragraph, article or annex, or a range of them, from an Austrian law as in force on a date."""
     iso = _iso_date(date)
     if iso is None:
-        return f"'{date}' is not a date in YYYY-MM-DD format."
-    return await _units(law, paragraph, "", iso, historical=True)
+        return DATE_ERROR.format(date)
+    return await _units(law, pick, paragraph, to_paragraph, iso)
 
 
 @mcp.tool()
 async def get_statute(
     name: Annotated[str, LAW_PARAM],
+    pick: Annotated[str, PICK_PARAM] = "",
+    date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
-    """Fetch the preamble and the first live paragraphs or articles of a statute."""
-    resolution = await _resolve(name, rc.today())
+    """Fetch the preamble and the first paragraphs or articles of a law as in force on a date."""
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(name, pick, iso)
     if isinstance(resolution, str):
         return resolution
 
@@ -300,11 +317,11 @@ async def get_statute(
 
     # Without a sort column RIS returns document order: the § 0 preamble first, transitional provisions last.
     refs, total = await rc.search_bundesrecht(
-        gesetzesnummer=resolution.law.number, fassung_vom=rc.today(), pro_seite="Ten"
+        gesetzesnummer=resolution.law.number, fassung_vom=iso, pro_seite="Ten"
     )
     body = [r for r in refs if rc._meta_from_ref(r)["paragraph"] != "§ 0" and not rc._meta_from_ref(r)["transitional"]]
     if body:
-        parts.append(f"*{total} documents in force. Showing the first {len(body)}; get_law_outline lists all.*\n")
+        parts.append(f"*{total} documents in force {rc._when(iso)}. Showing the first {len(body)}; get_law_outline lists all.*\n")
         htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in body])
         for ref, html in zip(body, htmls):
             parts.append(f"### {rc._meta_from_ref(ref)['paragraph']}")
@@ -317,12 +334,17 @@ async def get_statute(
 @mcp.tool()
 async def get_law_outline(
     law: Annotated[str, LAW_PARAM],
+    pick: Annotated[str, PICK_PARAM] = "",
+    date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
     """Return full table of contents for a statute: § numbers with their headings, grouped by section.
 
     Use this to discover which paragraph covers a topic without relying on prior knowledge.
     """
-    resolution = await _resolve(law, rc.today())
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(law, pick, iso)
     if isinstance(resolution, str):
         return resolution
 
@@ -398,9 +420,14 @@ async def lookup_bgbl(
 @mcp.tool()
 async def get_amendment_timeline(
     law: Annotated[str, LAW_PARAM],
+    pick: Annotated[str, PICK_PARAM] = "",
+    date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
-    """Return an ordered list of every BGBl amendment that touched a statute."""
-    resolution = await _resolve(law, rc.today())
+    """Return the amendments RIS lists for a law, as of a date."""
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(law, pick, iso)
     if isinstance(resolution, str):
         return resolution
 

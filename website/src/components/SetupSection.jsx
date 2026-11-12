@@ -101,7 +101,7 @@ export default function SetupSection() {
         <p style={{
           fontSize: '0.875rem', color: 'var(--text-muted)', marginBottom: '0.875rem', lineHeight: 1.6,
         }}>
-          Point your client at the URL. No Python, no clone, no API key. Gives you the seven
+          Point your client at the URL. No Python, no clone, no API key. Gives you the six
           tools that query RIS live.
         </p>
         <div className="code-block" style={{ position: 'relative' }}>

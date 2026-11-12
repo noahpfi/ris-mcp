@@ -8,11 +8,21 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 |---|---|---|
 | `search_law` | Full-text search across Bundesrecht in force on a date, newest first | ✓ |
 | `get_paragraph` | Fetch a paragraph, article or annex, or a range such as §§ 200–210 UGB, as in force on a date | ✓ |
-| `get_statute` | Preamble and first paragraphs of a statute | ✓ |
-| `get_law_outline` | Full table of contents for a statute, grouped by section | ✓ |
+| `get_statute` | Preamble, amendments and first paragraphs of a law | ✓ |
+| `get_law_outline` | Every document of a law under its RIS label, with headings and sections | ✓ |
 | `lookup_bgbl` | Text and metadata of a BGBl entry, e.g. `BGBl. I Nr. 50/2023` | ✓ |
 | `get_amendment_timeline` | The amendments RIS lists for a law | ✓ |
 | `who_mentions` | Reverse citation lookup, e.g. which provisions cite `§ 879` | self-host |
+
+## Naming a law
+
+Tools take a law by name, short title or abbreviation, such as `ABGB`, `EStG` or `Konsumentenschutzgesetz`. RIS searches its titles for the whole words given; the server adds `*` to words of three or more characters, so `Einkommensteuer` finds the Einkommensteuergesetz.
+
+When exactly one hit carries the name as its abbreviation or short title, a trailing year aside, the tool uses that law. The answer names the law, why it was chosen and every other hit. Any other outcome returns the hits with their Gesetzesnummer, and the next call names one through `pick`. A `pick` counts only when it is among the hits for the name, because RIS reuses numbers across laws.
+
+`date` reads a law as in force on that day, today if empty. A repealed law is found only with a date from its time in force.
+
+`get_paragraph` takes `1295`, `§ 879a`, `Art. 7`, `Anl. 1/ThNa` or `Art. 10 § 1`, and an optional end of range. A bare number returns every kind RIS holds under it. Documents RIS returns beyond the citation are listed by label, so nothing is dropped.
 
 ## Hosted
 
@@ -84,7 +94,7 @@ Everything that depends on RIS behaviour runs only in the live suite.
 
 ## Legal
 
-Code is MIT licensed. Legal data comes from RIS, published by the Bundeskanzleramt under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Every tool response carries that attribution, keep it attached when quoting or re-serving output.
+Code is MIT licensed. Legal data comes from RIS, published by the Bundeskanzleramt under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Every tool response that passes on RIS data carries that attribution, keep it attached when quoting or re-serving output.
 
 Only the Bundesgesetzblatt ("BGBl authentisch") is legally binding, consolidated texts returned here are not. RIS gives no warranty on accuracy or completeness, and nothing here is legal advice.
 

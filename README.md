@@ -26,7 +26,7 @@ When exactly one hit carries the name as its abbreviation or short title, a trai
 
 - `number`, the unit number with its suffix, sent as `Abschnitt.Von`. Alone it returns the units with exactly this number, in every container. Empty returns the whole law.
 - `to`, the end of a range, sent as `Abschnitt.Bis`. With it RIS compares numbers only, so `5` to `6` also returns § 5a to § 5d and § 6a onward.
-- `kind`, sent as `Abschnitt.Typ`: `Paragraph`, `Artikel` or `Anlage`. Empty means every kind.
+- `kind`, sent as `Abschnitt.Typ`. `Paragraph` covers units numbered with §, also inside an article; `Artikel` covers units numbered Art. with the §§ inside them; `Anlage` covers every attachment, whatever the law calls it, such as Anlage, Anhang, Annex, Protokoll or Schlussakte. Empty means every kind.
 
 RIS ignores `to` and `kind` without `number`, so the tool refuses that combination.
 

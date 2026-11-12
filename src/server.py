@@ -1,12 +1,15 @@
-"""RIS MCP server, Austrian federal law for LLMs"""
+"""MCP server that serves Austrian federal law from RIS to language models."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
-from typing import Annotated, Any
+from datetime import date as Date
+from typing import Annotated, Any, Literal
 
 import anyio
+from pydantic import BeforeValidator, Field
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
@@ -15,16 +18,42 @@ from starlette.responses import JSONResponse
 from . import config
 from . import http_app
 from . import ris_client as rc
-from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
+from .content import html_to_markdown, extract_metadata_blocks, outline_version, parse_law_outline
 from . import index as fts_index
 
 
-# get_paragraph fans out one upstream fetch per paragraph -> range = amplification lever, capped
-MAX_RANGE = 20
+# get_paragraph fetches each document's text separately, so this caps the upstream requests one call triggers.
+MAX_TEXTS = 20
 
-_LEADING_DIGITS = re.compile(r"^\s*(\d+)")
+# Pages of 100 read per get_paragraph call. Larger laws are cut with a notice naming how many were not read.
+MAX_UNIT_PAGES = 3
+NUMBER_PARAM = (
+    'Optional. Number of a §, article or attachment in Arabic numerals, with its suffix: "1295", "879a", "365m1"; '
+    'Artikel VII is "7". Matches that number in every container, so "1" in the ABGB returns § 1, Art. 10 § 1 '
+    "and Art. 18 § 1. Subdivisions such as Abs., Z and lit. are part of their unit, RIS searches at most by "
+    'unit: § 1 Abs. 2 Z 3 is "1". '
+    "Section headings such as Teil, Abschnitt or Hauptstück are no units; get_law_outline lists them."
+)
+TO_PARAM = (
+    'Optional. Last number of a range, in the same form as number: §§ 200 to 210 is "200" to "210". Both ends include '
+    'their suffixed numbers, so "5" to "6" also returns § 5a and § 6c.'
+)
+KIND_PARAM = (
+    'Optional, needs number. "Paragraph": units numbered with §, also those inside an article. "Artikel": units numbered '
+    'Art., together with the §§ inside them. "Anlage": every attachment, whatever the law calls it, such as '
+    "Anlage, Anhang, Annex, Protokoll or Schlussakte."
+)
+KINDS = ("Paragraph", "Artikel", "Anlage")
 
-# CC BY 4.0 requires attribution on pass-on; only gazette wording binding -> note on response, website reaches nobody
+
+def _kind(value: Any) -> Any:
+    """Spells a kind the way RIS requires; RIS rejects Abschnitt.Typ in any other capitalisation."""
+    if not isinstance(value, str):
+        return value
+    return {kind.casefold(): kind for kind in KINDS}.get(value.strip().casefold(), value.strip())
+
+# CC BY 4.0 requires attribution when the data is passed on, and only the gazette wording is binding. The note
+# travels with each response because the end user never sees the website.
 SOURCE_CONSOLIDATED = (
     "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0). Consolidated text — "
     "no guarantee of accuracy, currency or completeness; only the wording published in the "
@@ -37,26 +66,52 @@ SOURCE_AUTHENTIC = (
 
 
 def _sourced(body: str, authentic: bool = False) -> str:
-    """append source, licence, bindingness to RIS-data response"""
+    """Appends the source, licence and bindingness note to a response built from RIS data."""
     return body + (SOURCE_AUTHENTIC if authentic else SOURCE_CONSOLIDATED)
 
 
 def _expiry_note(meta: dict[str, Any]) -> str:
-    return f"  valid until {meta['valid_until']}" if meta["valid_until"] else ""
+    expiry = meta["valid_until"] or meta["repealed"]
+    return f"  valid until {expiry}" if expiry else ""
 
 
-def _range_span(start: str, end: str) -> int | None:
-    """None unless clean integer pair; suffixes like § 1295a left to per-result cap, not guessed"""
-    if not end:
+LAW_PARAM = (
+    'Words from the title, short title or abbreviation of the law: "ABGB", "Konsumentenschutzgesetz", '
+    '"Einkommensteuer". Words of 3 or more characters match as prefixes, shorter ones as whole words.'
+)
+PICK_PARAM = (
+    "Optional. Gesetzesnummer copied from this tool's own list, nothing else. RIS reuses numbers, one number can mean "
+    "multiple documents. A number from memory can therefore point to a different or repealed law. Leave pick "
+    "empty and read the list before using pick."
+)
+DATE_PARAM = 'Optional. Day the law is read as in force, as "YYYY-MM-DD", defaults to today.'
+
+
+async def _resolve(law: str, pick: str, date: str) -> rc.Resolution | str:
+    """Returns the resolution, or the text to answer with when the name does not lead to one law."""
+    try:
+        return await rc.resolve_law(law, date, pick)
+    except rc.LawLookupError as exc:
+        return str(exc)
+
+
+DATE_ERROR = "'{}' is not a date in YYYY-MM-DD format."
+
+
+def _iso_date(text: str) -> str | None:
+    """Normalises a YYYY-MM-DD date, empty meaning today, or returns None. RIS answers any other FassungVom with
+    a SOAP fault."""
+    if not text.strip():
+        return rc.today()
+    try:
+        return Date.fromisoformat(text.strip()).isoformat()
+    except ValueError:
         return None
-    lo, hi = _LEADING_DIGITS.match(start), _LEADING_DIGITS.match(end)
-    if not lo or not hi:
-        return None
-    return int(hi.group(1)) - int(lo.group(1)) + 1
 
 
 def _transport_security() -> TransportSecuritySettings | None:
-    """Host/Origin allowlist; FastMCP enables it only on loopback -> binding 0.0.0.0 silently drops check"""
+    """Host and Origin allowlist for public deployments. FastMCP turns this check on only for loopback hosts,
+    so binding 0.0.0.0 would run without it."""
     if not config.PUBLIC_HOSTS:
         return None
     return TransportSecuritySettings(
@@ -81,315 +136,323 @@ mcp = FastMCP(
     host=config.HOST,
     port=config.PORT,
     log_level=config.LOG_LEVEL,
-    # stateless -> dumb tunnel, no affinity; json_response keeps off SSE, suits Cloudflare proxy buffering
+    # Stateless HTTP needs no session affinity behind the tunnel. JSON responses avoid SSE, which the Cloudflare
+    # proxy buffers.
     stateless_http=True,
     json_response=True,
     transport_security=_transport_security(),
 )
 
 
+SEARCH_PAGE_SIZE = 50
+
+
 @mcp.tool()
 async def search_law(
-    query: Annotated[str, "Full-text search terms"],
-    law: Annotated[str, "Optional law name or abbreviation to scope the search (e.g. ABGB, StGB)"] = "",
+    query: Annotated[str, Field(description="Words searched in the full text of every document")],
+    law: Annotated[str, Field(description=f"Optional. {LAW_PARAM}")] = "",
+    page: Annotated[int, Field(description=f"Optional. Result page, {SEARCH_PAGE_SIZE} hits each")] = 1,
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
+    """Full-text search of Austrian federal law (Bundesrecht) as in force on a date.
 
-    Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
-    text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
-    Prefer get_law_outline to browse a known statute's table of contents.
-    Only versions in force today are searched, most recently entered into force first.
+    Terms match the statute's own wording verbatim: "Kleinunternehmer", not "kleine Gewerbetreibende".
+    Hits come newest entry into force first; RIS ranks no relevance.
     """
+    # Resolves the optional law to a Gesetzesnummer, then lets RIS sort all hits by entry into force and
+    # return the requested page. RIS has no relevance ranking, and sorting one page locally would show an
+    # arbitrary 50 hits in date order.
+    if page < 1:
+        return "page starts at 1."
+    date = _iso_date(date)
+    if date is None:
+        return DATE_ERROR.format(date)
+    header = ""
+    scope: dict[str, str] = {}
+    if law.strip():
+        resolution = await _resolve(law, pick, date)
+        if isinstance(resolution, str):
+            return resolution
+        header = rc.describe_resolution(resolution) + "\n"
+        scope["gesetzesnummer"] = resolution.law.number
+
     refs, total = await rc.search_bundesrecht(
-        suchworte=query, titel=law.strip(), fassung_vom=rc.today(), pro_seite="Fifty"
+        suchworte=query,
+        fassung_vom=date,
+        sort_by="Inkrafttretensdatum",
+        descending=True,
+        seite=page,
+        pro_seite="Fifty",
+        **scope,
     )
-
+    pages = math.ceil(total / SEARCH_PAGE_SIZE)
     if not refs:
-        return "No results in force today. Repealed wording is reachable via get_paragraph_at."
+        return f"RIS found 0 documents for '{query}' in force {rc._when(date)}."
 
-    refs = sorted(refs, key=lambda r: rc._meta_from_ref(r)["in_force_from"], reverse=True)
-
-    lines = [f"Found {total} result(s) in force today, showing {len(refs)}, newest first.\n"]
+    more = f" Next: page={page + 1}." if page < pages else ""
+    lines = [f"{header}Found {total} result(s) in force {rc._when(date)}, newest in force first. Page {page} of {pages}.{more}\n"]
     for ref in refs:
         meta = rc._meta_from_ref(ref)
-        lines.append(f"**{meta['short_title']}** {meta['paragraph']}{_expiry_note(meta)}")
+        lines.append(f"**{meta['short_title']}** {_label(ref)}{_expiry_note(meta)}")
         lines.append(f"  Document: {meta['document_id']}")
         lines.append(f"  In force: {meta['in_force_from']}")
-        lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 
     return _sourced("\n".join(lines))
 
 
-@mcp.tool()
-async def get_paragraph(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
-    paragraph: Annotated[str, "Paragraph number, e.g. 1295"],
-    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} from the start"] = "",
-) -> str:
-    """Fetch one paragraph or a range of paragraphs from an Austrian statute."""
-    span = _range_span(paragraph, to_paragraph)
-    if span is not None and span > MAX_RANGE:
-        return (
-            f"Range §§ {paragraph}–{to_paragraph} covers {span} paragraphs; the limit is "
-            f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
-        )
+async def _units(law: str, pick: str, number: str, to: str, kind: str, date: str) -> str:
+    """Serves get_paragraph.
 
-    refs, _ = await rc.search_bundesrecht(
-        titel=law.strip(),
-        abschnitt_von=paragraph,
-        abschnitt_bis=to_paragraph or paragraph,
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
+    Sends each Abschnitt parameter only when set, suffixes in lower case as RIS labels them. Returns full text for the first MAX_TEXTS documents RIS sent, in RIS order, and lists the
+    rest by label.
+    """
+    number, to = number.strip().lower(), to.strip().lower()
+    if (to or kind) and not number:
+        return "to and kind need number; RIS ignores them without Abschnitt.Von."
+
+    resolution = await _resolve(law, pick, date)
+    if isinstance(resolution, str):
+        return resolution
+
+    refs, total = await rc.search_bundesrecht_pages(
+        MAX_UNIT_PAGES,
+        gesetzesnummer=resolution.law.number,
+        abschnitt_von=number,
+        abschnitt_bis=to,
+        abschnitt_typ=kind,
+        fassung_vom=date,
     )
-
+    sent = [f"Abschnitt.{name}={value}" for name, value in (("Von", number), ("Bis", to), ("Typ", kind)) if value]
+    asked = ", ".join(sent) or "the whole law"
     if not refs:
-        return (
-            f"No version of {law} § {paragraph} in force today. "
-            "Repealed wording is reachable via get_paragraph_at."
-        )
+        return f"RIS returned no document of {resolution.law.short_title} in force {rc._when(date)} for {asked}."
 
-    # API may widen range past span check -> cap again, one call fans out to many fetches
-    refs = refs[:MAX_RANGE]
-
-    # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
-    parts: list[str] = []
-    for ref in refs:
+    shown, later = refs[:MAX_TEXTS], refs[MAX_TEXTS:]
+    parts = [rc.describe_resolution(resolution), "", f"*RIS returned {total} documents for {asked}.*", ""]
+    as_of = "" if date == rc.today() else f" (as of {date})"
+    # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff then pushes a
+    # 15-paragraph range past 60 seconds.
+    for ref in shown:
         meta = rc._meta_from_ref(ref)
-        html = await rc.fetch_document_html(ref)
-        text = html_to_markdown(html)
-        parts.append(f"### {meta['short_title']} {meta['paragraph']}")
+        text = html_to_markdown(await rc.fetch_document_html(ref))
+        parts.append(f"### {meta['short_title']} {_label(ref)}{as_of}")
         parts.append(f"*{meta['kundmachung']}*")
         parts.append(f"*In force from: {meta['in_force_from']}{_expiry_note(meta)}*")
         parts.append(f"*Document: {meta['document_id']}*")
         parts.append("")
         parts.append(text)
+        parts.append(f"URL: {meta['doc_url']}")
         parts.append("")
+    if later:
+        parts.append(f"*Full text for the first {MAX_TEXTS}; ask for these by number: {_labels(later)}.*")
+    if len(refs) < total:
+        parts.append(f"*{total - len(refs)} more documents were not read; narrow with number and to.*")
 
     return _sourced("\n".join(parts))
 
 
-@mcp.tool()
-async def get_paragraph_at(
-    law: Annotated[str, "Law name or abbreviation"],
-    paragraph: Annotated[str, "Paragraph number"],
-    date: Annotated[str, "Date in YYYY-MM-DD format — returns the version in force on that date"],
-) -> str:
-    """Fetch the historical version of a paragraph as it read on a given date."""
-    refs, _ = await rc.search_bundesrecht(
-        titel=law.strip(),
-        abschnitt_von=paragraph,
-        abschnitt_bis=paragraph,
-        abschnitt_typ="Paragraph",
-        fassung_vom=date,
-        pro_seite="Ten",
-    )
-
-    if not refs:
-        return f"No version of {law} § {paragraph} found for date {date}."
-
-    ref = refs[0]
+def _label(ref: dict[str, Any]) -> str:
+    """The RIS label of a document, followed by RIS's Uebergangsrecht value where it sets one."""
     meta = rc._meta_from_ref(ref)
-    html = await rc.fetch_document_html(ref)
-    text = html_to_markdown(html)
+    return meta["paragraph"] + (f" [{meta['transitional']}]" if meta["transitional"] else "")
 
-    return _sourced("\n".join([
-        f"### {meta['short_title']} {meta['paragraph']} (as of {date})",
-        f"*{meta['kundmachung']}*",
-        f"*In force from: {meta['in_force_from']}*",
-        f"*Document: {meta['document_id']}*",
-        "",
-        text,
-    ]))
+
+def _labels(refs: list[dict[str, Any]]) -> str:
+    return ", ".join(_label(ref) for ref in refs)
+
+
+@mcp.tool()
+async def get_paragraph(
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    number: Annotated[str, Field(description=NUMBER_PARAM)] = "",
+    to: Annotated[str, Field(description=TO_PARAM)] = "",
+    kind: Annotated[
+        Literal["", "Paragraph", "Artikel", "Anlage"], BeforeValidator(_kind), Field(description=KIND_PARAM)
+    ] = "",
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
+) -> str:
+    """Full text of §§, articles and attachments of an Austrian federal law as in force on a date.
+
+    Takes no citation text: convert the citation into number, to and kind.
+    """
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    return await _units(law, pick, number, to, kind, iso)
 
 
 @mcp.tool()
 async def get_statute(
-    name: Annotated[str, "Law name or abbreviation, e.g. ABGB, GmbHG"],
+    name: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Fetch the preamble and first page of paragraphs for a statute."""
-    titel = name.strip()
+    """Fetch the preamble and the first paragraphs or articles of a law as in force on a date."""
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(name, pick, iso)
+    if isinstance(resolution, str):
+        return resolution
 
-    refs_pre, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
+    preamble = resolution.law.preamble
+    blocks = extract_metadata_blocks(await rc.fetch_document_html(preamble))
+    parts = [rc.describe_resolution(resolution), "", f"# {blocks.get('Kurztitel', resolution.law.short_title)}", ""]
+    for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
+        if label in blocks:
+            parts.append(f"**{label}:** {blocks[label]}")
+    preamble_meta = rc._meta_from_ref(preamble)
+    parts.extend(["", "**Änderungen:**", _amendments(preamble_meta), f"URL: {preamble_meta['doc_url']}", ""])
+
+    # Without a sort column RIS returns document order: the § 0 preamble first, transitional provisions last.
+    refs, total = await rc.search_bundesrecht(
+        gesetzesnummer=resolution.law.number, fassung_vom=iso, pro_seite="Ten"
     )
-
-    parts: list[str] = []
-
-    if refs_pre:
-        ref = rc.best_law_match(refs_pre, titel)
-        html = await rc.fetch_document_html(ref)
-        blocks = extract_metadata_blocks(html)
-        meta = rc._meta_from_ref(ref)
-        parts.append(f"# {blocks.get('Kurztitel', meta['short_title'])}")
-        parts.append("")
-        for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
-            if label in blocks:
-                parts.append(f"**{label}:** {blocks[label]}")
-        if "Änderung" in blocks:
-            amendments = blocks["Änderung"].split("\n")
-            suffix = f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""
-            parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
-        parts.append("")
-
-    refs_body, total = await rc.search_bundesrecht(
-        titel=titel,
-        fassung_vom=rc.today(),
-        pro_seite="Ten",
-        seite=1,
-    )
-
-    if refs_body:
-        parts.append(f"*Statute has {total} sections in force. Showing first {len(refs_body)}.*\n")
-        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in refs_body])
-        for ref, html in zip(refs_body, htmls):
+    body = [r for r in refs if rc._meta_from_ref(r)["paragraph"] != "§ 0" and not rc._meta_from_ref(r)["transitional"]]
+    if body:
+        parts.append(f"*{total} documents in force {rc._when(iso)}. Showing the first {len(body)}; get_law_outline lists all.*\n")
+        htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in body])
+        for ref, html in zip(body, htmls):
             meta = rc._meta_from_ref(ref)
-            if meta["doc_type"] == "Paragraph" and meta["paragraph_number"] != "0":
-                text = html_to_markdown(html)
-                parts.append(f"### {meta['paragraph']}")
-                parts.append(text)
-                parts.append("")
+            parts.append(f"### {meta['paragraph']}")
+            parts.append(html_to_markdown(html))
+            parts.append(f"URL: {meta['doc_url']}")
+            parts.append("")
 
-    if not parts:
-        return f"Statute '{name}' not found."
     return _sourced("\n".join(parts))
 
 
 @mcp.tool()
 async def get_law_outline(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB, UGB"],
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Return full table of contents for a statute: § numbers with their headings, grouped by section.
+    """Table of contents of a law: each document's label with its headings, and section headings."""
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(law, pick, iso)
+    if isinstance(resolution, str):
+        return resolution
 
-    Use this to discover which paragraph covers a topic without relying on prior knowledge.
-    """
-    titel = law.strip()
-    refs, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
+    meta = rc._meta_from_ref(resolution.law.preamble)
+    if not meta["outline_url"]:
+        return f"RIS gives no consolidated version URL for {meta['short_title']}."
+    separator = "&" if "?" in meta["outline_url"] else "?"
+    outline_url = f"{meta['outline_url']}{separator}FassungVom={iso}"
+
+    html, (_, total) = await asyncio.gather(
+        rc._get_html(outline_url),
+        rc.search_bundesrecht(gesetzesnummer=resolution.law.number, fassung_vom=iso),
     )
-    if not refs:
-        refs, _ = await rc.search_bundesrecht(titel=titel, fassung_vom=rc.today(), pro_seite="Ten")
-    if not refs:
-        return f"Law '{law}' not found."
+    version = outline_version(html) or f"Fetched on {rc.today()}; RIS states no version date for this page"
+    parts = [
+        rc.describe_resolution(resolution),
+        "",
+        f"# {meta['short_title']}, table of contents",
+        f"*{version}. RIS holds {total} documents for this law in force {rc._when(iso)}; full text per unit via get_paragraph.*",
+        "",
+        parse_law_outline(html),
+        "",
+        f"URL: {outline_url}",
+    ]
+    return _sourced("\n".join(parts))
 
-    ref = rc.best_law_match(refs, titel)
-    meta = rc._meta_from_ref(ref)
-    outline_url = meta["outline_url"]
-    if not outline_url:
-        return f"No outline URL for '{law}'."
 
-    html = await rc._get_html(outline_url)
-    outline = parse_law_outline(html)
-    if not outline:
-        return f"Could not parse outline for '{law}'."
-
-    return _sourced(f"# {meta['short_title']} — Table of Contents\n\n{outline}")
+# Characters of gazette text per answer, picked by feel. Long amending acts exceed 100k characters, and the URL
+# carries the full entry.
+BGBL_TEXT_LIMIT = 6000
+# The authentic gazette in BgblAuth starts in 2004. Older issues are scanned PDFs outside this API.
+BGBL_AUTH_FROM = 2004
+# Optional Teil as I, II or III, optional "Nr.", then number/year.
+_BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b", re.IGNORECASE)
 
 
 @mcp.tool()
 async def lookup_bgbl(
-    reference: Annotated[str, "BGBl reference, e.g. 'BGBl I Nr. 50/2023' or '50/2023'"],
+    reference: Annotated[str, Field(description='Gazette reference such as "BGBl. I Nr. 50/2023" or "II 50/2023". Teil is "I", "II" or "III"; without it all three are listed.')],
 ) -> str:
-    """Look up an authentic Bundesgesetzblatt entry and return its title and amended laws."""
-    m = re.search(r"(\d+/\d+)", reference)
-    if not m:
-        return f"Could not parse BGBl number from '{reference}'. Use format like '50/2023'."
+    """Look up an authentic Bundesgesetzblatt entry and return its metadata and text."""
+    # Reads Teil, number and year. A number/year exists once per Teil, so without a Teil all three are
+    # searched and several hits are listed for the caller to choose. One hit returns its metadata and its
+    # text up to BGBL_TEXT_LIMIT.
+    match = _BGBL.search(reference)
+    if not match:
+        return f"Could not read a BGBl number from '{reference}'. Use a form like 'BGBl. I Nr. 50/2023'."
+    teil, number, year = (match.group(1) or "").upper(), match.group(2), int(match.group(3))
 
-    bgbl_num = m.group(1)
-    refs, _ = await rc.search_bgbl_auth(bgbl_nummer=bgbl_num)
-
+    teile = (len(teil),) if teil else (1, 2, 3)
+    refs, _ = await rc.search_bgbl_auth(f"{number}/{year}", teile)
+    wanted = f"BGBl. {teil} Nr. {number}/{year}" if teil else f"BGBl. Nr. {number}/{year}"
     if not refs:
-        return f"BGBl Nr. {bgbl_num} not found. Note: BgblAuth only covers entries from 2004 onwards."
+        older = f" The authentic gazette in RIS starts in {BGBL_AUTH_FROM}." if year < BGBL_AUTH_FROM else ""
+        return f"RIS found no {wanted} in the authentic gazette.{older}"
 
-    ref = refs[0]
-    meta_raw = ref.get("Data", {}).get("Metadaten", {})
-    bundesrecht = meta_raw.get("Bundesrecht", {})
-    technisch = meta_raw.get("Technisch", {})
-    allgemein = meta_raw.get("Allgemein", {})
+    if len(refs) > 1:
+        lines = [f"{wanted} exists in {len(refs)} parts of the gazette. Ask again with the Teil:"]
+        for meta in sorted((rc.bgbl_meta(ref) for ref in refs), key=lambda m: m["number"]):
+            lines.append(f"- {meta['number']} ({meta['type']}, {meta['issued']}): {meta['short_title'] or meta['title']}")
+        return "\n".join(lines)
 
-    html = await rc.fetch_document_html(ref)
-    blocks = extract_metadata_blocks(html)
-
+    meta = rc.bgbl_meta(refs[0])
+    text = html_to_markdown(await rc.fetch_document_html(refs[0]))
     lines = [
-        f"## BGBl {bgbl_num}",
-        f"**ID:** {technisch.get('ID', '')}",
-        f"**URL:** {allgemein.get('DokumentUrl', '')}",
-        f"**Titel:** {bundesrecht.get('Titel', '')}",
-        "",
+        f"## {meta['number']}",
+        f"**Titel:** {meta['title']}",
+        f"**Typ:** {meta['type']}",
+        f"**Ausgabedatum:** {meta['issued']}",
+        f"**ID:** {meta['id']}",
+        f"**URL:** {meta['url']}",
     ]
-
-    for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum"):
-        if label in blocks:
-            lines.append(f"**{label}:** {blocks[label]}")
-
-    if "Text" in blocks:
-        lines.append(f"\n### Content\n{blocks['Text'][:2000]}")
+    if meta["pdf"]:
+        lines.append(f"**Authentic PDF:** {meta['pdf']}")
+    if text:
+        cut = len(text) > BGBL_TEXT_LIMIT
+        lines.append(f"\n### Text\n{text[:BGBL_TEXT_LIMIT]}")
+        if cut:
+            lines.append(f"\n*Text cut at {BGBL_TEXT_LIMIT} of {len(text)} characters; the URL has the full entry.*")
 
     return _sourced("\n".join(lines), authentic=True)
 
 
 @mcp.tool()
 async def get_amendment_timeline(
-    law: Annotated[str, "Law name or abbreviation, e.g. ABGB, StGB"],
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Return an ordered list of every BGBl amendment that touched a statute."""
-    titel = law.strip()
+    """Return the amendments RIS lists for a law, as of a date, in RIS's order."""
+    iso = _iso_date(date)
+    if iso is None:
+        return DATE_ERROR.format(date)
+    resolution = await _resolve(law, pick, iso)
+    if isinstance(resolution, str):
+        return resolution
 
-    refs, _ = await rc.search_bundesrecht(
-        titel=titel,
-        abschnitt_von="0",
-        abschnitt_bis="0",
-        abschnitt_typ="Paragraph",
-        fassung_vom=rc.today(),
-        pro_seite="Fifty",
-    )
-
-    if not refs:
-        return f"Statute '{law}' not found."
-
-    ref = rc.best_law_match(refs, titel)
-    html = await rc.fetch_document_html(ref)
-    blocks = extract_metadata_blocks(html)
-
-    short_title = blocks.get("Kurztitel", law)
-    amendments_raw = blocks.get("Änderung", "")
-
-    if not amendments_raw:
-        return f"No amendment list found for {law}."
-
-    amendments = [a.strip() for a in amendments_raw.split("\n") if a.strip()]
-    lines = [f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
-    for i, a in enumerate(amendments, 1):
-        lines.append(f"{i}. {a}")
-
+    meta = rc._meta_from_ref(resolution.law.preamble)
+    lines = [rc.describe_resolution(resolution), "", f"## Amendments: {meta['short_title']}", "", _amendments(meta), "", f"URL: {meta['doc_url']}"]
     return _sourced("\n".join(lines))
 
 
-async def who_mentions(
-    reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
-    limit: Annotated[int, "Max results to return (1-100, default 20)"] = 20,
-) -> str:
-    """Full-text search the local RIS index for laws that mention a given citation.
+def _amendments(meta: dict[str, Any]) -> str:
+    """The Aenderung field of a preamble as RIS gives it, one line per line."""
+    lines = [line.strip() for line in meta["amendments"].splitlines() if line.strip()]
+    return "\n".join(lines) or f"RIS lists no amendments; original publication {meta['kundmachung']}."
 
-    Reverse citation lookup: finds provisions that cite the one you name.
-    Backed by a locally built FTS index, so it is only registered where that
-    index exists.
-    """
-    # negative LIMIT = unbounded in SQLite -> clamp, else -1 returns whole match set
+
+async def who_mentions(
+    reference: Annotated[str, Field(description='Citation as statute text writes it, such as "§ 1295 ABGB" or "Art. 7 B-VG"')],
+    limit: Annotated[int, Field(description="Optional. Number of results, at most 100")] = 20,
+) -> str:
+    """Reverse citation lookup in a local index: provisions whose text cites the one named."""
+    # SQLite treats a negative LIMIT as unbounded, so -1 would return the whole match set.
     limit = max(1, min(limit, 100))
 
-    # SQLite blocks, FTS5 full scan slow -> off event loop or every request stalls
+    # SQLite calls block and an FTS5 scan can be slow, so they run in a thread to keep other requests moving.
     count = await asyncio.to_thread(fts_index.doc_count)
     if count == 0:
         return (
@@ -416,7 +479,7 @@ async def who_mentions(
     return _sourced("\n".join(lines))
 
 
-# registered last, conditionally; hosted runs index-free, hidden tool beats always-unavailable one
+# Hosted instances run without the index, and hiding the tool there beats offering one that always fails.
 if config.index_enabled():
     mcp.add_tool(who_mentions)
 

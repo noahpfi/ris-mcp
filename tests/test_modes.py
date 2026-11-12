@@ -11,7 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 LIVE_API_TOOLS = {
-    "search_law", "get_paragraph", "get_paragraph_at", "get_statute",
+    "search_law", "get_paragraph", "get_statute",
     "get_law_outline", "lookup_bgbl", "get_amendment_timeline",
 }
 

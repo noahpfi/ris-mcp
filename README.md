@@ -6,14 +6,45 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 
 | Tool | Purpose | Hosted |
 |---|---|---|
-| `search_law` | Full-text search across Bundesrecht in force today, newest first | ✓ |
-| `get_paragraph` | Fetch a paragraph or range such as §§ 200–210 UGB, live version only | ✓ |
-| `get_paragraph_at` | Historical version of a paragraph on a given date | ✓ |
-| `get_statute` | Preamble and first page of live paragraphs for a statute | ✓ |
-| `get_law_outline` | Full table of contents for a statute, grouped by section | ✓ |
-| `lookup_bgbl` | Look up a BGBl entry by number, e.g. `50/2023` | ✓ |
-| `get_amendment_timeline` | Every BGBl that amended a statute, in order | ✓ |
+| `search_law` | Full-text search across Bundesrecht in force on a date, newest first | ✓ |
+| `get_paragraph` | Fetch paragraphs, articles or annexes by number, or a range such as §§ 200–210 UGB, as in force on a date | ✓ |
+| `get_statute` | Preamble, amendments and first paragraphs of a law | ✓ |
+| `get_law_outline` | Every document of a law under its RIS label, with headings and sections | ✓ |
+| `lookup_bgbl` | Text and metadata of a BGBl entry, e.g. `BGBl. I Nr. 50/2023` | ✓ |
+| `get_amendment_timeline` | The amendments RIS lists for a law | ✓ |
 | `who_mentions` | Reverse citation lookup, e.g. which provisions cite `§ 879` | self-host |
+
+## Naming a law
+
+Tools take a law by name, short title or abbreviation, such as `ABGB`, `EStG` or `Konsumentenschutzgesetz`. RIS searches its titles for the whole words given; the server adds `*` to words of three or more characters, so `Einkommensteuer` finds the Einkommensteuergesetz.
+
+When exactly one hit carries the name as its abbreviation or short title, a trailing year aside, the tool uses that law. The answer names the law, why it was chosen and every other hit. Any other outcome returns the hits with their Gesetzesnummer, and the next call names one through `pick`. A `pick` counts only when it is among the hits for the name, because RIS reuses numbers across laws.
+
+`date` reads a law as in force on that day, today if empty. A repealed law is found only with a date from its time in force.
+
+`get_paragraph` takes RIS's own parameters rather than citation text, and the calling model converts the citation. Each is optional and sent to RIS only when given, so leaving them empty asks for the most RIS holds:
+
+- `number`, the unit number with its suffix, sent as `Abschnitt.Von`. Alone it returns the units with exactly this number, in every container. Empty returns the whole law.
+- `to`, the end of a range, sent as `Abschnitt.Bis`. With it RIS compares numbers only, so `5` to `6` also returns § 5a to § 5d and § 6a onward.
+- `kind`, sent as `Abschnitt.Typ`. `Paragraph` covers units numbered with §, also inside an article; `Artikel` covers units numbered Art. with the §§ inside them; `Anlage` covers every attachment, whatever the law calls it, such as Anlage, Anhang, Annex, Protokoll or Schlussakte. Empty means every kind.
+
+RIS ignores `to` and `kind` without `number`, so the tool refuses that combination.
+
+Examples:
+
+| Citation | number | to | kind |
+|---|---|---|---|
+| § 1295 ABGB | `1295` | | `Paragraph` |
+| § 879a | `879a` | | `Paragraph` |
+| Art. 7 B-VG, Artikel VII | `7` | | `Artikel` |
+| Anlage 1, Anhang 1 | `1` | | `Anlage` |
+| Art. 10 § 1 | `1` | | `Paragraph` |
+| § 1 Abs. 2 Z 3 | `1` | | `Paragraph` |
+| §§ 200–210 UGB | `200` | `210` | `Paragraph` |
+| unsure of the kind | `7` | | |
+| the whole law | | | |
+
+Every document RIS returns comes back under its RIS label: full text for the first 20, the rest listed. `number` 1 in the ABGB therefore also returns the § 1 inside Art. 10 and Art. 18. Section headings such as Abschnitt or Hauptstück are not units; `get_law_outline` shows them.
 
 ## Hosted
 
@@ -72,10 +103,11 @@ All variables are optional. Defaults suit a local stdio run.
 ## Tests
 
 ```bash
-pytest
+pytest           # offline: input parsing, refusals, HTTP failure handling
+pytest -m live   # against the real RIS API
 ```
 
-Tests run offline against a temporary database.
+Everything that depends on RIS behaviour runs only in the live suite.
 
 ## Notes
 
@@ -84,7 +116,7 @@ Tests run offline against a temporary database.
 
 ## Legal
 
-Code is MIT licensed. Legal data comes from RIS, published by the Bundeskanzleramt under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Every tool response carries that attribution, keep it attached when quoting or re-serving output.
+Code is MIT licensed. Legal data comes from RIS, published by the Bundeskanzleramt under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Every tool response that passes on RIS data carries that attribution, keep it attached when quoting or re-serving output.
 
 Only the Bundesgesetzblatt ("BGBl authentisch") is legally binding, consolidated texts returned here are not. RIS gives no warranty on accuracy or completeness, and nothing here is legal advice.
 

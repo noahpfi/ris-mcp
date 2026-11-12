@@ -1,29 +1,11 @@
-"""no network, RIS client stubbed"""
+"""Crawling RIS into the local index. Page arithmetic runs offline; crawls run against the real RIS API with
+`pytest -m live`, a page or two at a time."""
 from __future__ import annotations
 
 import pytest
 
 from src import index
 from src import ris_client as rc
-
-PAGES = 12
-PER_PAGE = 100
-
-
-def _ref(doc_id: str) -> dict:
-    return {"Data": {
-        "Metadaten": {
-            "Technisch": {"ID": doc_id},
-            "Allgemein": {"DokumentUrl": f"https://ris/{doc_id}"},
-            "Bundesrecht": {"Kurztitel": "ABGB", "BrKons": {
-                "ArtikelParagraphAnlage": f"§ {doc_id}",
-                "Inkrafttretensdatum": "1900-01-01",
-            }},
-        },
-        "Dokumentliste": {"ContentReference": {"Urls": {"ContentUrl": [
-            {"DataType": "Html", "Url": f"https://ris/{doc_id}.html"},
-        ]}}},
-    }}
 
 
 @pytest.fixture(autouse=True)
@@ -38,85 +20,71 @@ def fresh_db():
     index._count_cache.clear()
 
 
+@pytest.mark.parametrize("total, pages, last", [(2566, 0, 26), (2600, 0, 26), (2566, 5, 5), (2566, 40, 26), (0, 0, 0)])
+def test_last_page_never_passes_the_end(total, pages, last):
+    """RIS answers a page past the end with an error, so the crawl must stop on the last page itself."""
+    assert index._last_page(total, pages) == last
+
+
 @pytest.fixture
-def stub_api(monkeypatch):
-    """serves PAGES synthetic pages, records API interaction order"""
+def recorded(monkeypatch):
+    """Passes every call through to RIS and records the order of page scans and document fetches."""
     events: list[str] = []
+    search, fetch = rc.search_bundesrecht, rc.fetch_document_html
 
-    async def search_bundesrecht(*, seite=1, **_kwargs):
-        events.append(f"scan:{seite}")
-        if seite > PAGES:
-            return [], PAGES * PER_PAGE
-        start = (seite - 1) * PER_PAGE
-        return [_ref(f"d{start + i}") for i in range(PER_PAGE)], PAGES * PER_PAGE
+    async def scan(**kwargs):
+        events.append(f"scan:{kwargs.get('seite', 1)}")
+        return await search(**kwargs)
 
-    async def fetch_document_html(ref):
-        doc_id = rc._meta_from_ref(ref)["document_id"]
-        events.append(f"fetch:{doc_id}")
-        return f"<html><body><p>body of {doc_id}</p></body></html>"
+    async def read(ref):
+        events.append(f"fetch:{rc._meta_from_ref(ref)['document_id']}")
+        return await fetch(ref)
 
-    monkeypatch.setattr(rc, "search_bundesrecht", search_bundesrecht)
-    monkeypatch.setattr(rc, "fetch_document_html", fetch_document_html)
+    monkeypatch.setattr(rc, "search_bundesrecht", scan)
+    monkeypatch.setattr(rc, "fetch_document_html", read)
     return events
 
 
-async def test_fill_gaps_indexes_every_missing_document(stub_api):
-    indexed = await index.fill_gaps(batch_size=20, base_delay=0)
-    assert indexed == PAGES * PER_PAGE
+def _count() -> int:
     index._count_cache.clear()
-    assert index.doc_count() == PAGES * PER_PAGE
+    return index.doc_count()
 
 
-async def test_fill_gaps_streams_instead_of_collecting(stub_api):
-    """fetch must interleave with scan; collect-first held ~20KB/ref, ~5.7GB at 280k gap, crawler container dies"""
-    await index.fill_gaps(batch_size=20, base_delay=0)
-
-    last_scan = max(i for i, e in enumerate(stub_api) if e.startswith("scan:"))
-    first_fetch = min(i for i, e in enumerate(stub_api) if e.startswith("fetch:"))
-    assert first_fetch < last_scan, "all scanning completed before any fetching"
-
-
-async def test_fill_gaps_skips_documents_already_indexed(stub_api):
-    await index.fill_gaps(batch_size=20, base_delay=0)
-    stub_api.clear()
-
-    indexed = await index.fill_gaps(batch_size=20, base_delay=0)
-    assert indexed == 0
-    assert not [e for e in stub_api if e.startswith("fetch:")], "refetched known documents"
+@pytest.mark.live
+async def test_crawl_indexes_each_page_and_records_where_to_resume(recorded):
+    indexed = await index.crawl(pages=1, base_delay=0, resume=False)
+    assert indexed == index.PAGE_SIZE == _count()
+    assert recorded.count("scan:1") == 1 and not [e for e in recorded if e.startswith("scan:2")]
+    assert index._resume_page() == 1
 
 
-async def test_fill_gaps_marks_the_run_even_with_no_gaps(stub_api):
-    await index.fill_gaps(batch_size=20, base_delay=0)
-    index._count_cache.clear()
-    first = index.last_crawl()
-    assert first
+@pytest.mark.live
+async def test_fill_gaps_streams_and_skips_what_it_already_holds(recorded):
+    """Fetching interleaves with scanning, since collecting every missing reference first held about 20 KB per
+    reference, 5.7 GB at a gap of 280k."""
+    indexed = await index.fill_gaps(batch_size=20, base_delay=0, pages=2)
+    assert indexed == 2 * index.PAGE_SIZE == _count()
+    assert recorded.index("scan:2") > next(i for i, e in enumerate(recorded) if e.startswith("fetch:"))
+    first_pass = index.last_crawl()
 
-    await index.fill_gaps(batch_size=20, base_delay=0)
-    index._count_cache.clear()
-    assert index.last_crawl() >= first
-
-
-async def test_fill_gaps_survives_a_failing_document(stub_api, monkeypatch):
-    async def flaky(ref):
-        doc_id = rc._meta_from_ref(ref)["document_id"]
-        if doc_id == "d5":
-            raise RuntimeError("upstream refused")
-        if doc_id == "d6":
-            return ""
-        return f"<html><body><p>{doc_id}</p></body></html>"
-
-    monkeypatch.setattr(rc, "fetch_document_html", flaky)
-    indexed = await index.fill_gaps(batch_size=20, base_delay=0)
-    assert indexed == PAGES * PER_PAGE - 2
-    index._count_cache.clear()
-    assert index.doc_count() == PAGES * PER_PAGE - 2
+    recorded.clear()
+    assert await index.fill_gaps(batch_size=20, base_delay=0, pages=2) == 0
+    assert not [e for e in recorded if e.startswith("fetch:")]
+    assert index.last_crawl() >= first_pass
 
 
-async def test_crawl_writes_pages_and_resume_marker(stub_api):
-    indexed = await index.crawl(pages=2, base_delay=0, resume=False)
-    assert indexed == 2 * PER_PAGE
-    index._count_cache.clear()
-    assert index.doc_count() == 2 * PER_PAGE
-    with index._connect(readonly=True) as conn:
-        row = conn.execute("SELECT value FROM crawl_meta WHERE key='last_page'").fetchone()
-    assert row[0] == "2"
+@pytest.mark.live
+async def test_fill_gaps_skips_a_document_that_fails_and_indexes_the_rest(recorded, monkeypatch):
+    fetch = rc.fetch_document_html
+    failed: list[str] = []
+
+    async def first_fails(ref):
+        if not failed:
+            failed.append(rc._meta_from_ref(ref)["document_id"])
+            raise rc.RisApiError("RIS answered 503 Service Unavailable 4 times")
+        return await fetch(ref)
+
+    monkeypatch.setattr(rc, "fetch_document_html", first_fails)
+    indexed = await index.fill_gaps(batch_size=20, base_delay=0, pages=1)
+    assert indexed == index.PAGE_SIZE - 1 == _count()
+    assert failed[0] not in index._existing_ids()

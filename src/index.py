@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -19,6 +20,8 @@ from .content import html_to_markdown
 logger = logging.getLogger(__name__)
 
 BUSY_TIMEOUT_MS = 5000
+# DokumenteProSeite=OneHundred
+PAGE_SIZE = 100
 # doc_count() = full FTS5 scan, hit per who_mentions + healthcheck; changes only on crawl
 _COUNT_TTL = 300
 _count_cache: TTLCache = TTLCache(maxsize=2, ttl=_COUNT_TTL)
@@ -165,7 +168,7 @@ async def _fetch_adaptive(
         *[rc.fetch_document_html(ref) for ref in refs],
         return_exceptions=True,
     )
-    errors = sum(1 for r in results if isinstance(r, Exception) or not r)
+    errors = sum(1 for r in results if isinstance(r, Exception))
     if errors >= 2:
         delay = min(delay * 2, 30.0)
         logger.warning("Rate errors (%d/batch) — slowing to %.1fs", errors, delay)
@@ -181,13 +184,19 @@ def _index_results(
     indexed = 0
     for ref, html in zip(refs, results):
         meta = rc._meta_from_ref(ref)
-        if isinstance(html, Exception) or not html:
+        if isinstance(html, Exception):
             logger.warning("Skipping %s", meta["document_id"])
             continue
         _upsert(conn, meta["document_id"], meta["short_title"], meta["paragraph"],
                 meta["doc_url"], meta["in_force_from"], html_to_markdown(html))
         indexed += 1
     return indexed
+
+
+def _last_page(total: int, pages: int) -> int:
+    """ris answers a page past the end with an error, not an empty page"""
+    last = math.ceil(total / PAGE_SIZE)
+    return min(last, pages) if pages else last
 
 
 async def crawl(pages: int = 0, base_delay: float = 0.5, resume: bool = True) -> int:
@@ -233,7 +242,7 @@ async def crawl(pages: int = 0, base_delay: float = 0.5, resume: bool = True) ->
         logger.info("Page %d/%d: +%d docs (%d total indexed) [delay=%.1fs]",
                     page, (total // 100) + 1, len(refs), indexed, batch_delay)
 
-        if pages and page >= pages:
+        if page >= _last_page(total, pages):
             break
 
         page += 1
@@ -241,7 +250,7 @@ async def crawl(pages: int = 0, base_delay: float = 0.5, resume: bool = True) ->
     return indexed
 
 
-async def fill_gaps(batch_size: int = 20, base_delay: float = 1.0) -> int:
+async def fill_gaps(batch_size: int = 20, base_delay: float = 1.0, pages: int = 0) -> int:
     """index API docs missing locally; interleaved, collect-first = ~5.7GB at 280k gap; max 1 page + 1 batch live"""
     init_db()
     known = _existing_ids()
@@ -284,6 +293,8 @@ async def fill_gaps(batch_size: int = 20, base_delay: float = 1.0) -> int:
         if page % 25 == 0:
             logger.info("Scanned %d/%d docs — %d indexed, %d queued [delay=%.1fs]",
                         scanned, total, indexed, len(pending), batch_delay)
+        if page >= _last_page(total, pages):
+            break
         page += 1
 
     if pending:

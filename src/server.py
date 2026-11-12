@@ -188,11 +188,13 @@ async def search_law(
 async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: str) -> str:
     """Serves get_paragraph.
 
-    1. Parse the citation and range, and refuse ranges wider than MAX_RANGE numbers before any upstream call.
-    2. Resolve the law to its Gesetzesnummer.
-    3. Query the Abschnitt range and keep the exact labels via sections.select. A bare number is tried as §,
-       then Art., then Anl., and the first kind with matches wins.
-    4. With no match, list the labels RIS returned near the citation. Otherwise fetch and render each document.
+    1. Parse the citation and range, and refuse ranges wider than MAX_RANGE numbers before any request.
+    2. Lead the law name to its Gesetzesnummer.
+    3. Send one Abschnitt query: the number and suffix of each end, and the kind given, or Alle for a bare
+       number. RIS compares numbers only, so the answer may hold more than the citation names.
+    4. Split the answer without dropping anything. A single citation with a kind gets full text for the labels
+       equal to it; a bare number or a range gets full text for everything inside its enclosing units. Every
+       other document RIS returned is listed by label.
     """
     start = sections.parse(paragraph)
     end = sections.end_of_range(start, to_paragraph) if start and to_paragraph else start
@@ -212,49 +214,32 @@ async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: s
     if isinstance(resolution, str):
         return resolution
 
-    picked: list[dict[str, Any]] = []
-    nearby: list[dict[str, Any]] = []
-    truncated = False
-    for kind in sections.IMPLICIT_KINDS if start.implicit else (start.last.kind,):
-        first, last = (start.with_kind(kind), end.with_kind(kind)) if start.implicit else (start, end)
-        lo, hi = first.units[0], last.units[0]
-        refs, total = await rc.search_bundesrecht_pages(
-            MAX_UNIT_PAGES,
-            gesetzesnummer=resolution.law.number,
-            abschnitt_von=lo.query,
-            abschnitt_bis=hi.query,
-            abschnitt_typ=sections.ABSCHNITT_TYP[lo.kind],
-            fassung_vom=date,
-        )
-        picked = sections.select(refs, first, last)
-        nearby = nearby or refs
-        truncated = len(refs) < total
-        if picked:
-            start, end = first, last
-            break
-
-    when = rc._when(date)
+    refs, total = await rc.search_bundesrecht_pages(
+        MAX_UNIT_PAGES,
+        gesetzesnummer=resolution.law.number,
+        abschnitt_von=start.last.query,
+        abschnitt_bis=end.last.query,
+        abschnitt_typ=start.abschnitt_typ,
+        fassung_vom=date,
+    )
+    exact = start == end and not start.implicit
+    named = [r for r in refs if (start.names if exact else start.contains)(rc._meta_from_ref(r)["paragraph"])]
+    rest = [r for r in refs if not any(r is n for n in named)]
     wanted = f"{start}" if start == end else f"{start} to {end}"
-    if not picked:
-        lines = [f"No {wanted} in {resolution.law.short_title} in force {when}."]
-        if nearby:
-            labels = ", ".join(_label(r) for r in nearby[:MAX_RANGE])
-            lines.append(f"RIS holds near it: {labels}.")
-        if date == rc.today():
-            lines.append("Earlier wording is reachable with the date field.")
-        return "\n".join(lines)
+    cut = f" RIS holds {total} documents for this query; the first {len(refs)} were read." if len(refs) < total else ""
 
+    if not named:
+        line = f"No {wanted} in {resolution.law.short_title} in force {rc._when(date)}."
+        if refs:
+            line += f" RIS returned for {wanted}: {_labels(refs)}."
+        return line + cut
+
+    shown, later = named[:MAX_RANGE], named[MAX_RANGE:]
     parts = [rc.describe_resolution(resolution), ""]
-    if len(picked) > MAX_RANGE:
-        parts.append(f"*{len(picked)} documents match {wanted}; showing the first {MAX_RANGE}, continue after {_label(picked[MAX_RANGE - 1])}.*\n")
-        picked = picked[:MAX_RANGE]
-    if truncated:
-        parts.append(f"*RIS returned more than {MAX_UNIT_PAGES * 100} documents for this range; narrow it to see all.*\n")
-
     as_of = "" if date == rc.today() else f" (as of {date})"
-    # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff in _get_html then pushes a
+    # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff then pushes a
     # 15-paragraph range past 60 seconds.
-    for ref in picked:
+    for ref in shown:
         meta = rc._meta_from_ref(ref)
         text = html_to_markdown(await rc.fetch_document_html(ref))
         parts.append(f"### {meta['short_title']} {_label(ref)}{as_of}")
@@ -263,21 +248,33 @@ async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: s
         parts.append(f"*Document: {meta['document_id']}*")
         parts.append("")
         parts.append(text)
+        parts.append(f"URL: {meta['doc_url']}")
         parts.append("")
+    if later:
+        first = rc._meta_from_ref(later[0])["paragraph"]
+        parts.append(f"*{len(later)} more over the limit of {MAX_RANGE}: {_labels(later)}. Continue with paragraph={first}.*")
+    if rest:
+        parts.append(f"RIS also returned for {wanted}: {_labels(rest)}. Ask for one by its full label.")
+    if cut:
+        parts.append(cut.strip())
 
     return _sourced("\n".join(parts))
 
 
 def _label(ref: dict[str, Any]) -> str:
-    """The RIS label of a document, marked when it is a transitional provision that reuses a § number."""
+    """The RIS label of a document, followed by RIS's Uebergangsrecht value where it sets one."""
     meta = rc._meta_from_ref(ref)
-    return meta["paragraph"] + (" (transitional)" if meta["transitional"] else "")
+    return meta["paragraph"] + (f" [{meta['transitional']}]" if meta["transitional"] else "")
+
+
+def _labels(refs: list[dict[str, Any]]) -> str:
+    return ", ".join(_label(ref) for ref in refs)
 
 
 @mcp.tool()
 async def get_paragraph(
     law: Annotated[str, LAW_PARAM],
-    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}. A bare number tries §, then Art., then Anl."],
+    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}. A bare number returns every kind RIS holds under it."],
     to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} numbers from the start"] = "",
     pick: Annotated[str, PICK_PARAM] = "",
     date: Annotated[str, DATE_PARAM] = "",

@@ -21,12 +21,13 @@ from src import server
     ("Anl. 1/ThNa", "Anl. 1/ThNa"),
     ("Anlage 2/m1", "Anl. 2/m1"),
     ("§ 1.", "§ 1"),
+    ("§ 365m1", "§ 365m1"),
 ])
 def test_citation_forms_parse_to_ris_labels(text, expected):
     assert str(sections.parse(text)) == expected
 
 
-@pytest.mark.parametrize("text", ["", "abc", "1295 ABGB", "Art. 10 1", "§ IV"])
+@pytest.mark.parametrize("text", ["", "abc", "1295 ABGB", "Art. 10 1", "§ IV", "§ 5 a"])
 def test_non_citations_are_rejected(text):
     assert sections.parse(text) is None
 
@@ -39,6 +40,31 @@ def test_bare_number_is_implicit_explicit_kind_is_not():
 def test_bare_range_end_inherits_kind_and_container():
     start = sections.parse("Art. 2 § 4")
     assert str(sections.end_of_range(start, "6")) == "Art. 2 § 6"
+
+
+@pytest.mark.parametrize("citation, label, named", [
+    ("§ 1", "§ 1", True),
+    ("§ 1", "Art. 10 § 1", False),
+    ("Art. 10 § 1", "Art.\xa010 §\xa01", True),
+    ("Anl. 1/thna", "Anl. 1/ThNa", True),
+    ("§ 5", "§ 5a", False),
+])
+def test_label_is_named_by_text_only(citation, label, named):
+    assert sections.parse(citation).names(label) is named
+
+
+@pytest.mark.parametrize("citation, label, inside", [
+    ("Art. 2 § 4", "Art. 2 § 5", True),
+    ("Art. 2 § 4", "Art. 20 § 5", False),
+    ("§ 4", "Art. 2 § 5", True),
+])
+def test_enclosing_units_bound_what_a_range_contains(citation, label, inside):
+    assert sections.parse(citation).contains(label) is inside
+
+
+@pytest.mark.parametrize("text, typ", [("7", "Alle"), ("§ 7", "Paragraph"), ("Art. 7", "Artikel"), ("Anl. 7", "Anlage")])
+def test_bare_number_asks_ris_for_every_kind(text, typ):
+    assert sections.parse(text).abschnitt_typ == typ
 
 
 async def test_unreadable_citation_names_accepted_forms(no_upstream):

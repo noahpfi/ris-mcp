@@ -127,3 +127,53 @@ async def test_repealed_law_is_reached_with_its_date():
     assert "- Insolvenzordnung (IO): 10001736" in listed
     out = await server.get_paragraph(law="KO", paragraph="1", date="2005-01-01", pick="10001736")
     assert _headings(out)[0] == "Insolvenzordnung § 1 (as of 2005-01-01)"
+
+
+def _shown(out: str, title: str) -> list[str]:
+    """Labels that got full text, read from the headings the tool writes."""
+    return [h[len(title) + 1:] for h in _headings(out) if h.startswith(title + " ")]
+
+
+async def test_single_citation_gets_its_own_text_and_lists_the_rest():
+    out = await server.get_paragraph(law="ABGB", paragraph="§ 1")
+    assert _shown(out, "Allgemeines bürgerliches Gesetzbuch") == ["§ 1"]
+    assert "RIS also returned for § 1: Art. 10 § 1 [ÜR], Art. 18 § 1 [ÜR]." in out
+    assert "\nURL: https://" in out
+
+
+async def test_suffixed_neighbours_are_listed_not_dropped():
+    out = await server.get_paragraph(law="KSchG", paragraph="§ 5")
+    assert _shown(out, "Konsumentenschutzgesetz") == ["§ 5"]
+    assert "§ 5a" in out.split("RIS also returned for § 5:")[1]
+
+
+async def test_label_with_letter_and_digit_suffix_is_reachable():
+    out = await server.get_paragraph(law="GewO", pick="10007517", paragraph="§ 365m1")
+    assert _shown(out, "Gewerbeordnung 1994") == ["§ 365m1"]
+
+
+async def test_bare_number_returns_every_kind():
+    out = await server.get_paragraph(law="KSchG", paragraph="1")
+    shown = _shown(out, "Konsumentenschutzgesetz")
+    assert "§ 1" in shown and "Anl. 1" in shown and any(label.startswith("Art. 1 [") for label in shown)
+
+
+async def test_range_inside_an_article():
+    out = await server.get_paragraph(law="DSG", paragraph="Art. 2 § 4", to_paragraph="6")
+    assert _shown(out, "Datenschutzgesetz") == ["Art. 2 § 4", "Art. 2 § 5", "Art. 2 § 6"]
+
+
+async def test_range_returns_what_ris_holds_between_the_numbers():
+    out = await server.get_paragraph(law="KSchG", paragraph="5", to_paragraph="6")
+    shown = _shown(out, "Konsumentenschutzgesetz")
+    assert shown[0] == "§ 5" and "§ 5a" in shown and "§ 6" in shown
+
+
+async def test_miss_lists_everything_ris_returned():
+    """DSG keeps its paragraphs inside Art. 1 and Art. 2."""
+    out = await server.get_paragraph(law="DSG", paragraph="§ 1")
+    assert out.startswith("No § 1 in Datenschutzgesetz in force today. RIS returned for § 1: Art. 1 § 1")
+
+
+async def test_miss_with_nothing_returned_says_so():
+    assert await server.get_paragraph(law="KSchG", paragraph="§ 99") == "No § 99 in Konsumentenschutzgesetz in force today."

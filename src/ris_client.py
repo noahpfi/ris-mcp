@@ -175,7 +175,7 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
         "valid_until": "" if repealed else expiry,
         "outline_url": brkons.get("GesamteRechtsvorschriftUrl", ""),
         "law_number": brkons.get("Gesetzesnummer", ""),
-        "transitional": bool(brkons.get("Uebergangsrecht")),
+        "transitional": brkons.get("Uebergangsrecht", ""),
         "doc_type": brkons.get("Dokumenttyp", ""),
         "eli": bundesrecht.get("Eli", ""),
     }

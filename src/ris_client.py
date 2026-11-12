@@ -374,9 +374,11 @@ async def resolve_law(name: str, date: str, pick: str = "") -> Resolution:
     if pick or len(exact) != 1:
         head = f"Gesetzesnummer {pick} is not among them. " if pick else ""
         listing = "\n".join(f"- {_describe(law)}" for law in ordered)
+        dated = sum(1 for law in exact if rules[law.number][1])
+        with_year = f", {dated} more with a trailing year" if dated else ""
         raise LawLookupError(
-            f"RIS returned {_count(len(laws), 'law')} in force {when} for '{sent}'; {len(exact)} named exactly '{_tidy(name)}'. "
-            f"{head}Call again with pick=<Gesetzesnummer>:\n{listing}"
+            f"RIS returned {_count(len(laws), 'law')} in force {when} for '{sent}'; {len(exact) - dated} named "
+            f"exactly '{_tidy(name)}'{with_year}. {head}Call again with pick=<Gesetzesnummer>:\n{listing}"
         )
     chosen = exact[0]
     field, undated = rules[chosen.number]

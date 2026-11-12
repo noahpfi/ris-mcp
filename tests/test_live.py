@@ -89,7 +89,7 @@ async def test_single_exact_hit_is_used_and_every_other_hit_is_listed():
 
 async def test_shared_abbreviation_lists_instead_of_guessing():
     out = await server.get_statute(name="GOG")
-    assert "3 named exactly 'GOG'" in out
+    assert "2 named exactly 'GOG', 1 more with a trailing year." in out
     assert "(GOG): 10000009" in out and "(GOG): 10000576" in out and "(GOG 1945): 10000205" in out
     assert "Law used" not in out
 

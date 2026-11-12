@@ -89,7 +89,7 @@ async def test_single_exact_hit_is_used_and_every_other_hit_is_listed():
 
 async def test_shared_abbreviation_lists_instead_of_guessing():
     out = await server.get_statute(name="GOG")
-    assert "3 named exactly 'GOG'" in out
+    assert "2 named exactly 'GOG', 1 more with a trailing year." in out
     assert "(GOG): 10000009" in out and "(GOG): 10000576" in out and "(GOG 1945): 10000205" in out
     assert "Law used" not in out
 
@@ -150,8 +150,9 @@ async def test_capitalisation_of_number_and_kind_does_not_matter():
 
 
 async def test_number_alone_returns_that_number_only():
-    shown = _shown(await server.get_paragraph(law="KSchG", number="5", kind="Paragraph"), "Konsumentenschutzgesetz")
-    assert shown == ["§ 5"]
+    out = await server.get_paragraph(law="KSchG", number="5", kind="Paragraph")
+    assert _shown(out, "Konsumentenschutzgesetz") == ["§ 5"]
+    assert "*RIS returned 1 document for Abschnitt.Von=5, Abschnitt.Typ=Paragraph.*" in out
 
 
 async def test_range_returns_suffixed_units_between_the_numbers():

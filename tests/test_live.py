@@ -138,7 +138,7 @@ async def test_every_document_ris_returns_gets_its_text():
     """RIS compares numbers only: ABGB § 1 also returns the § 1 of two transitional articles."""
     out = await server.get_paragraph(law="ABGB", number="1", kind="Paragraph")
     assert _shown(out, "Allgemeines bürgerliches Gesetzbuch") == ["§ 1", "Art. 10 § 1 [ÜR]", "Art. 18 § 1 [ÜR]"]
-    assert "*RIS returned 3 documents for Abschnitt 1, Typ Paragraph.*" in out
+    assert "*RIS returned 3 documents for Abschnitt.Von=1, Abschnitt.Typ=Paragraph.*" in out
     assert "\nURL: https://" in out
 
 
@@ -147,9 +147,14 @@ async def test_suffix_bound_narrows_to_that_unit():
     assert _shown(out, "Gewerbeordnung 1994") == ["§ 365m1"]
 
 
-async def test_number_alone_also_returns_its_suffixed_units():
+async def test_number_alone_returns_that_number_only():
     shown = _shown(await server.get_paragraph(law="KSchG", number="5", kind="Paragraph"), "Konsumentenschutzgesetz")
-    assert shown[:2] == ["§ 5", "§ 5a"]
+    assert shown == ["§ 5"]
+
+
+async def test_range_returns_suffixed_units_between_the_numbers():
+    shown = _shown(await server.get_paragraph(law="KSchG", number="5", to="6", kind="Paragraph"), "Konsumentenschutzgesetz")
+    assert shown[:3] == ["§ 5", "§ 5a", "§ 5b"] and "§ 6" in shown and "§ 6a" in shown
 
 
 async def test_empty_kind_returns_every_kind():
@@ -164,7 +169,14 @@ async def test_paragraphs_inside_an_article_are_reached_by_their_number():
 
 async def test_nothing_returned_says_what_was_asked():
     out = await server.get_paragraph(law="KSchG", number="99", kind="Paragraph")
-    assert out == "RIS returned no document of Konsumentenschutzgesetz in force today for Abschnitt 99, Typ Paragraph."
+    assert out == "RIS returned no document of Konsumentenschutzgesetz in force today for Abschnitt.Von=99, Abschnitt.Typ=Paragraph."
+
+
+async def test_no_parameters_return_the_whole_law_with_capped_texts():
+    out = await server.get_paragraph(law="KSchG")
+    assert re.search(r"\*RIS returned \d+ documents for the whole law\.\*", out)
+    assert len(_shown(out, "Konsumentenschutzgesetz")) == server.MAX_TEXTS
+    assert "ask for these by number: " in out
 
 
 async def _api_labels(number: str, date: str) -> list[str]:

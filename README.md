@@ -22,11 +22,13 @@ When exactly one hit carries the name as its abbreviation or short title, a trai
 
 `date` reads a law as in force on that day, today if empty. A repealed law is found only with a date from its time in force.
 
-`get_paragraph` takes RIS's own parameters rather than citation text, and the calling model converts the citation:
+`get_paragraph` takes RIS's own parameters rather than citation text, and the calling model converts the citation. Each is optional and sent to RIS only when given, so leaving them empty asks for the most RIS holds:
 
-- `number`, the unit number with its suffix, sent to RIS as `Abschnitt.Von`
-- `to`, the optional end of a range, at most 20 numbers further
-- `kind`, one of `Paragraph`, `Artikel` or `Anlage`, or empty for every kind
+- `number`, the unit number with its suffix, sent as `Abschnitt.Von`. Alone it returns the units with exactly this number, in every container. Empty returns the whole law.
+- `to`, the end of a range, sent as `Abschnitt.Bis`. With it RIS compares numbers only, so `5` to `6` also returns § 5a to § 5d and § 6a onward.
+- `kind`, sent as `Abschnitt.Typ`: `Paragraph`, `Artikel` or `Anlage`. Empty means every kind.
+
+RIS ignores `to` and `kind` without `number`, so the tool refuses that combination.
 
 Examples:
 
@@ -39,8 +41,10 @@ Examples:
 | Art. 10 § 1 | `1` | | `Paragraph` |
 | § 1 Abs. 2 Z 3 | `1` | | `Paragraph` |
 | §§ 200–210 UGB | `200` | `210` | `Paragraph` |
+| unsure of the kind | `7` | | |
+| the whole law | | | |
 
-RIS compares numbers only, so `5` also returns § 5a to § 5d, and § 1 of a law also returns the § 1 inside its articles. Every document RIS returns comes back under its RIS label, full text for the first 20 and the rest listed. Section headings such as Abschnitt or Hauptstück are not units; `get_law_outline` shows them.
+Every document RIS returns comes back under its RIS label: full text for the first 20, the rest listed. `number` 1 in the ABGB therefore also returns the § 1 inside Art. 10 and Art. 18. Section headings such as Abschnitt or Hauptstück are not units; `get_law_outline` shows them.
 
 ## Hosted
 

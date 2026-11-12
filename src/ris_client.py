@@ -189,7 +189,7 @@ async def search_bundesrecht(
     gesetzesnummer: str = "",
     abschnitt_von: str = "",
     abschnitt_bis: str = "",
-    abschnitt_typ: str = "Paragraph",
+    abschnitt_typ: str = "",
     fassung_vom: str = "",
     sort_by: str = "",
     descending: bool = False,
@@ -203,10 +203,11 @@ async def search_bundesrecht(
         params["Titel"] = titel
     if gesetzesnummer:
         params["Gesetzesnummer"] = gesetzesnummer
-    if abschnitt_von:
-        params["Abschnitt.Von"] = abschnitt_von
-        params["Abschnitt.Bis"] = abschnitt_bis or abschnitt_von
-        params["Abschnitt.Typ"] = abschnitt_typ
+    # Sent only when given. RIS reads Von alone as one number, Von with Bis as a numeric range, a missing Typ as
+    # every kind, and ignores Bis and Typ without Von.
+    for name, value in (("Von", abschnitt_von), ("Bis", abschnitt_bis), ("Typ", abschnitt_typ)):
+        if value:
+            params[f"Abschnitt.{name}"] = value
     if fassung_vom:
         params["FassungVom"] = fassung_vom
     if sort_by:

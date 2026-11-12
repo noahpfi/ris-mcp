@@ -1,18 +1,11 @@
-"""Requests a caller could use to fan out upstream calls, refused before any request, and the handling of
-HTTP failures. No network: transport failures come from httpx.MockTransport, not from copied RIS data."""
+"""Handling of HTTP failures. No network: failures come from httpx.MockTransport, not from copied RIS data.
+The cap on texts per call is checked in test_live.py."""
 from __future__ import annotations
 
 import httpx
 import pytest
 
 from src import ris_client as rc
-from src import server
-
-
-@pytest.mark.parametrize("number, to", [("1", "1500"), ("1", "21"), ("5a", "40b")])
-async def test_wide_range_is_refused_before_any_upstream_call(no_upstream, number, to):
-    result = await server.get_paragraph(law="ABGB", number=number, to=to)
-    assert "limit is" in result
 
 
 def _transport(monkeypatch, handler):

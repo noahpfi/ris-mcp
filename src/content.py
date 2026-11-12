@@ -71,56 +71,46 @@ def _clean(text: str) -> str:
 
 
 def parse_law_outline(html: str) -> str:
-    """Builds a table of contents from a GeltendeFassung page, which holds the whole consolidated law.
+    """Lists the documents of a GeltendeFassung page, which holds a whole consolidated law, in page order.
 
-    Each contentBlock is one document. Its label, such as § 5a or Anl. 1, and its first heading form one line.
-    Section headings that precede the label, such as a Hauptstück, become a bold line before it.
-    Documents keep the page order.
+    Each document sits in a documentContent container that opens with a screen-reader heading holding its
+    label, such as § 5a or Art. 1, and may hold no content block at all. Section headings such as a Hauptstück
+    become bold lines, the label and the other headings form one line. The visible label repeats the
+    screen-reader one and is left out.
     """
     tree = HTMLParser(html)
     for node in tree.css("span.sr-only"):
         node.decompose()
 
     lines: list[str] = []
-    for block in tree.css("div.contentBlock"):
-        sections: list[str] = []
-        label = heading = ""
-        for node in block.css("h1, h2, h3, h4, h5, h6"):
-            kind = _outline_role(node)
+    for marker in tree.css("div.documentContent > h2.onlyScreenreader"):
+        content = marker.parent
+        before: list[str] = []
+        headings: list[str] = []
+        after: list[str] = []
+        for node in content.css(", ".join(f"div.contentBlock h{level}" for level in range(1, 7))):
+            classes = (node.attributes.get("class") or "").split()
             text = _clean(node.text(separator=" "))
-            if not kind or not text:
+            if not text or "GldSymbol" in classes:
                 continue
-            # Section headings after the label belong to the inner structure of an annex, not to the law.
-            if kind == "section" and not label:
-                sections.append(text)
-            elif kind == "label" and not label:
-                label = _outline_label(text)
-            elif kind == "heading" and not heading:
-                heading = text
-        if sections:
-            lines.extend(["", f"**{' / '.join(sections)}**"])
-        entry = f"{label}  {heading}".strip()
-        if entry:
-            lines.append(entry)
-    return "\n".join(lines).strip()
+            if any(cls.startswith("UeberschrG") for cls in classes):
+                (after if headings else before).append(text)
+            else:
+                headings.append(text)
+        lines.extend(f"**{text}**" for text in before)
+        lines.append("  ".join([_clean(marker.text()), " / ".join(headings)]).strip())
+        lines.extend(f"**{text}**" for text in after)
+    return "\n".join(lines)
 
 
-_ROLES = {"GldSymbol": "label", "Anlagenbez": "label", "UeberschrPara": "heading", "UeberschrArt": "heading"}
+_VERSION = re.compile(r"Fassung vom \d{2}\.\d{2}\.\d{4}")
 
 
-def _outline_role(node) -> str:
-    """Classifies a heading by its RIS CSS class as label, heading, section or nothing."""
-    for cls in (node.attributes.get("class") or "").split():
-        if cls in _ROLES:
-            return _ROLES[cls]
-        if cls.startswith("UeberschrG"):
-            return "section"
-    return ""
-
-
-def _outline_label(text: str) -> str:
-    """Shortens a label to citation form: "Artikel 8a." becomes "Art. 8a" and "§ 1." becomes "§ 1"."""
-    return re.sub(r"^Artikel\b", "Art.", text).rstrip(".").strip()
+def outline_version(html: str) -> str:
+    """The version RIS states in the page title, such as Fassung vom 12.11.2026, or an empty string."""
+    title = HTMLParser(html).css_first("title")
+    match = _VERSION.search(title.text()) if title else None
+    return match.group(0) if match else ""
 
 
 def extract_metadata_blocks(html: str) -> dict[str, str]:

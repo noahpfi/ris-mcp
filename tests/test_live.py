@@ -177,3 +177,32 @@ async def test_miss_lists_everything_ris_returned():
 
 async def test_miss_with_nothing_returned_says_so():
     assert await server.get_paragraph(law="KSchG", paragraph="§ 99") == "No § 99 in Konsumentenschutzgesetz in force today."
+
+
+async def _api_labels(number: str, date: str) -> list[str]:
+    refs, _ = await rc.search_bundesrecht_pages(30, gesetzesnummer=number, fassung_vom=date)
+    return [rc._meta_from_ref(ref)["paragraph"] for ref in refs]
+
+
+def _outline_labels(out: str) -> list[str]:
+    body = out.split("full text per unit via get_paragraph.*\n\n", 1)[1].split("\n\nURL: ", 1)[0]
+    return [line.split("  ")[0] for line in body.splitlines() if not line.startswith("**")]
+
+
+@pytest.mark.parametrize("law, pick, number", [
+    ("KSchG", "", "10002462"),
+    ("Seeschiffahrtsorganisation", "10011477", "10011477"),
+    ("Lehrpläne allgemeinbildende", "10008568", "10008568"),
+])
+async def test_outline_lists_every_document_ris_holds_in_order(law, pick, number):
+    """Treaties carry no visible label markup, and some documents have no content block."""
+    out = await server.get_law_outline(law=law, pick=pick)
+    assert _outline_labels(out) == await _api_labels(number, rc.today())
+    assert re.search(r"\*Fassung vom \d{2}\.\d{2}\.\d{4}\. RIS holds \d+ documents", out)
+    assert "\nURL: https://" in out and out.endswith(server.SOURCE_CONSOLIDATED)
+
+
+async def test_outline_follows_the_date():
+    out = await server.get_law_outline(law="KSchG", date="2010-01-01")
+    assert "*Fassung vom 01.01.2010." in out
+    assert _outline_labels(out) == await _api_labels("10002462", "2010-01-01")

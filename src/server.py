@@ -18,7 +18,7 @@ from . import config
 from . import http_app
 from . import ris_client as rc
 from . import sections
-from .content import html_to_markdown, extract_metadata_blocks, parse_law_outline
+from .content import html_to_markdown, extract_metadata_blocks, outline_version, parse_law_outline
 from . import index as fts_index
 
 
@@ -334,7 +334,7 @@ async def get_law_outline(
     pick: Annotated[str, PICK_PARAM] = "",
     date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
-    """Return full table of contents for a statute: § numbers with their headings, grouped by section.
+    """Return the table of contents of a law as RIS lists it: each document's label with its headings, and section headings.
 
     Use this to discover which paragraph covers a topic without relying on prior knowledge.
     """
@@ -346,16 +346,27 @@ async def get_law_outline(
         return resolution
 
     meta = rc._meta_from_ref(resolution.law.preamble)
-    outline_url = meta["outline_url"]
-    if not outline_url:
-        return f"No outline URL for '{law}'."
+    if not meta["outline_url"]:
+        return f"RIS gives no consolidated version URL for {meta['short_title']}."
+    separator = "&" if "?" in meta["outline_url"] else "?"
+    outline_url = f"{meta['outline_url']}{separator}FassungVom={iso}"
 
-    html = await rc._get_html(outline_url)
-    outline = parse_law_outline(html)
-    if not outline:
-        return f"Could not parse outline for '{law}'."
-
-    return _sourced(f"{rc.describe_resolution(resolution)}\n\n# {meta['short_title']} — Table of Contents\n\n{outline}")
+    html, (_, total) = await asyncio.gather(
+        rc._get_html(outline_url),
+        rc.search_bundesrecht(gesetzesnummer=resolution.law.number, fassung_vom=iso),
+    )
+    version = outline_version(html) or f"Fetched on {rc.today()}; RIS states no version date for this page"
+    parts = [
+        rc.describe_resolution(resolution),
+        "",
+        f"# {meta['short_title']}, table of contents",
+        f"*{version}. RIS holds {total} documents for this law in force {rc._when(iso)}; full text per unit via get_paragraph.*",
+        "",
+        parse_law_outline(html),
+        "",
+        f"URL: {outline_url}",
+    ]
+    return _sourced("\n".join(parts))
 
 
 # Characters of gazette text per answer, picked by feel. Long amending acts exceed 100k characters, and the URL

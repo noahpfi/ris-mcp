@@ -28,17 +28,18 @@ MAX_TEXTS = 20
 # Pages of 100 read per get_paragraph call. Larger laws are cut with a notice naming how many were not read.
 MAX_UNIT_PAGES = 3
 NUMBER_PARAM = (
-    'Number of a §, article or attachment in Arabic numerals, with its suffix: "1295", "879a", "365m1"; '
+    'Optional. Number of a §, article or attachment in Arabic numerals, with its suffix: "1295", "879a", "365m1"; '
     'Artikel VII is "7". Matches that number in every container, so "1" in the ABGB returns § 1, Art. 10 § 1 '
-    'and Art. 18 § 1. Subdivisions such as Abs., Z and lit. are part of their unit: § 1 Abs. 2 Z 3 is "1". '
+    "and Art. 18 § 1. Subdivisions such as Abs., Z and lit. are part of their unit, RIS searches at most by "
+    'unit: § 1 Abs. 2 Z 3 is "1". '
     "Section headings such as Teil, Abschnitt or Hauptstück are no units; get_law_outline lists them."
 )
 TO_PARAM = (
-    'Last number of a range, in the same form as number: §§ 200 to 210 is "200" to "210". Both ends include '
+    'Optional. Last number of a range, in the same form as number: §§ 200 to 210 is "200" to "210". Both ends include '
     'their suffixed numbers, so "5" to "6" also returns § 5a and § 6c.'
 )
 KIND_PARAM = (
-    'Needs number. "Paragraph": units numbered with §, also those inside an article. "Artikel": units numbered '
+    'Optional, needs number. "Paragraph": units numbered with §, also those inside an article. "Artikel": units numbered '
     'Art., together with the §§ inside them. "Anlage": every attachment, whatever the law calls it, such as '
     "Anlage, Anhang, Annex, Protokoll or Schlussakte."
 )
@@ -79,11 +80,11 @@ LAW_PARAM = (
     '"Einkommensteuer". Words of 3 or more characters match as prefixes, shorter ones as whole words.'
 )
 PICK_PARAM = (
-    "Gesetzesnummer copied from this tool's own list, nothing else. RIS reuses numbers, one number can mean "
+    "Optional. Gesetzesnummer copied from this tool's own list, nothing else. RIS reuses numbers, one number can mean "
     "multiple documents. A number from memory can therefore point to a different or repealed law. Leave pick "
-    "empty and read the list instead."
+    "empty and read the list before using pick."
 )
-DATE_PARAM = 'Day the law is read as in force, as "YYYY-MM-DD".'
+DATE_PARAM = 'Optional. Day the law is read as in force, as "YYYY-MM-DD", defaults to today.'
 
 
 async def _resolve(law: str, pick: str, date: str) -> rc.Resolution | str:
@@ -149,8 +150,8 @@ SEARCH_PAGE_SIZE = 50
 @mcp.tool()
 async def search_law(
     query: Annotated[str, Field(description="Words searched in the full text of every document")],
-    law: Annotated[str, Field(description=LAW_PARAM)] = "",
-    page: Annotated[int, Field(description=f"Result page, {SEARCH_PAGE_SIZE} hits each")] = 1,
+    law: Annotated[str, Field(description=f"Optional. {LAW_PARAM}")] = "",
+    page: Annotated[int, Field(description=f"Optional. Result page, {SEARCH_PAGE_SIZE} hits each")] = 1,
     pick: Annotated[str, Field(description=PICK_PARAM)] = "",
     date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
@@ -445,7 +446,7 @@ def _amendments(meta: dict[str, Any]) -> str:
 
 async def who_mentions(
     reference: Annotated[str, Field(description='Citation as statute text writes it, such as "§ 1295 ABGB" or "Art. 7 B-VG"')],
-    limit: Annotated[int, Field(description="Number of results, at most 100")] = 20,
+    limit: Annotated[int, Field(description="Optional. Number of results, at most 100")] = 20,
 ) -> str:
     """Reverse citation lookup in a local index: provisions whose text cites the one named."""
     # SQLite treats a negative LIMIT as unbounded, so -1 would return the whole match set.

@@ -127,12 +127,16 @@ async def test_tools_list_exposes_the_full_surface(client):
 
 
 async def test_every_tool_parameter_reaches_the_client_with_its_description(client):
-    """A plain string in Annotated is dropped from the schema; only Field(description=...) is sent."""
+    """A plain string in Annotated is dropped from the schema; only Field(description=...) is sent. Optional
+    parameters say so first."""
     await _initialize(client)
     response = await client.post("/mcp", headers=MCP_HEADERS, json=_rpc("tools/list", {}, 2))
     for tool in _payload(response)["result"]["tools"]:
+        required = set(tool["inputSchema"].get("required", []))
         for name, schema in tool["inputSchema"]["properties"].items():
-            assert schema.get("description"), f"{tool['name']}.{name}"
+            description = schema.get("description", "")
+            assert description, f"{tool['name']}.{name}"
+            assert description.startswith("Optional") != (name in required), f"{tool['name']}.{name}"
 
 
 async def test_tool_call_reaches_the_local_index(client):

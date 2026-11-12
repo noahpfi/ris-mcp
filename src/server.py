@@ -28,21 +28,12 @@ MAX_TEXTS = 20
 # Pages of 100 read per get_paragraph call. Larger laws are cut with a notice naming how many were not read.
 MAX_UNIT_PAGES = 3
 NUMBER_PARAM = (
-    "Optional unit number with its suffix, sent to RIS as Abschnitt.Von. Alone it returns the units with exactly "
-    "this number in every container: 5 returns § 5 but not § 5a, and ABGB 1 returns § 1, Art. 10 § 1 and "
-    "Art. 18 § 1. Empty returns the whole law. Convert the citation yourself. Examples: § 1295 ABGB -> 1295; "
-    "§ 879a -> 879a; § 365m1 -> 365m1; Art. 7 B-VG or Artikel VII -> 7; Anlage 1 or Anhang 1 -> 1; "
-    "Art. 10 § 1 -> 1 with kind Paragraph; § 1 Abs. 2 Z 3 -> 1, since RIS holds no document below the unit. "
-    "Section headings such as Abschnitt or Hauptstück are not units; find them with get_law_outline."
+    "Unit number with its suffix. Matches every container: ABGB 1 returns § 1, Art. 10 § 1 and Art. 18 § 1. "
+    "Examples: § 1295 ABGB -> 1295; § 879a -> 879a; Art. 7 B-VG or Artikel VII -> 7; Anhang 1 -> 1; "
+    "Art. 10 § 1 -> 1; § 1 Abs. 2 Z 3 -> 1. Abschnitt and Hauptstück are headings, see get_law_outline."
 )
-TO_PARAM = (
-    "Optional end of a range, sent as Abschnitt.Bis; needs number. RIS then compares numbers only: 5 to 6 "
-    "returns § 5, § 5a to § 5d, § 6 and § 6a onward. Example: §§ 200 to 210 -> number 200, to 210."
-)
-KIND_PARAM = (
-    "Optional Abschnitt.Typ; needs number. Paragraph for §, Artikel for Art., Anlage for annexes, also when the "
-    "law calls them Anhang. Empty means every kind."
-)
+TO_PARAM = "Range end, inclusive of suffixes: 5 to 6 also returns § 5a and § 6a onward."
+KIND_PARAM = "Needs number. Anlage also covers what a law calls Anhang."
 
 # CC BY 4.0 requires attribution when the data is passed on, and only the gazette wording is binding. The note
 # travels with each response because the end user never sees the website.
@@ -67,16 +58,13 @@ def _expiry_note(meta: dict[str, Any]) -> str:
     return f"  valid until {expiry}" if expiry else ""
 
 
-LAW_PARAM = (
-    "Name, short title or abbreviation of the law, e.g. ABGB, EStG, Konsumentenschutzgesetz. RIS matches whole "
-    "words; the server adds * to words of 3 or more characters."
-)
+LAW_PARAM = "Name, short title or abbreviation, e.g. ABGB, Konsumentenschutzgesetz. Words of 3 or more characters match as prefixes."
 PICK_PARAM = (
     "Gesetzesnummer copied from this tool's own list, nothing else. RIS reuses numbers, one number can mean "
     "multiple documents. A number from memory can therefore point to a different or repealed law. Leave pick "
     "empty and read the list instead."
 )
-DATE_PARAM = "Date in YYYY-MM-DD format; the law is read as in force on that date. Empty means today."
+DATE_PARAM = "YYYY-MM-DD; the law as in force that day."
 
 
 async def _resolve(law: str, pick: str, date: str) -> rc.Resolution | str:
@@ -142,18 +130,15 @@ SEARCH_PAGE_SIZE = 50
 @mcp.tool()
 async def search_law(
     query: Annotated[str, Field(description="Full-text search terms")],
-    law: Annotated[str, Field(description=f"Optional, scopes the search to one law. {LAW_PARAM}")] = "",
+    law: Annotated[str, Field(description=LAW_PARAM)] = "",
     page: Annotated[int, Field(description=f"Result page, {SEARCH_PAGE_SIZE} hits each")] = 1,
     pick: Annotated[str, Field(description=PICK_PARAM)] = "",
     date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
+    """Search Austrian federal law (Bundesrecht) by keyword.
 
-    Note: the RIS API uses verbatim matching — use exact legal terms as they appear in statute
-    text (e.g. "Kleinunternehmer" not "kleine Gewerbetreibende", "Rechnung" not "Faktura").
-    Prefer get_law_outline to browse a known statute's table of contents.
-    Only versions in force on the date are searched, today by default. RIS has no relevance ranking; hits come most
-    recently entered into force first, across all pages.
+    Matching is verbatim, so use the statute's own terms: Kleinunternehmer, not kleine Gewerbetreibende.
+    No relevance ranking; hits come newest entry into force first.
     """
     # Resolves the optional law to a Gesetzesnummer, then lets RIS sort all hits by entry into force and
     # return the requested page. RIS has no relevance ranking, and sorting one page locally would show an
@@ -268,11 +253,7 @@ async def get_paragraph(
     pick: Annotated[str, Field(description=PICK_PARAM)] = "",
     date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Fetch paragraphs, articles or annexes of an Austrian law by number, as in force on a date.
-
-    Convert the citation into number, to and kind first; RIS takes no citation text. RIS compares numbers
-    only, so the answer can hold more documents than the citation names, each under its RIS label.
-    """
+    """Fetch paragraphs, articles or annexes of an Austrian law. Takes no citation text; convert it into number, to and kind."""
     iso = _iso_date(date)
     if iso is None:
         return DATE_ERROR.format(date)
@@ -326,10 +307,7 @@ async def get_law_outline(
     pick: Annotated[str, Field(description=PICK_PARAM)] = "",
     date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Return the table of contents of a law as RIS lists it: each document's label with its headings, and section headings.
-
-    Use this to discover which paragraph covers a topic without relying on prior knowledge.
-    """
+    """Table of contents of a law: each document's label with its headings, and section headings."""
     iso = _iso_date(date)
     if iso is None:
         return DATE_ERROR.format(date)
@@ -444,14 +422,9 @@ def _amendments(meta: dict[str, Any]) -> str:
 
 async def who_mentions(
     reference: Annotated[str, Field(description="Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'")],
-    limit: Annotated[int, Field(description="Max results to return (1-100, default 20)")] = 20,
+    limit: Annotated[int, Field(description="At most 100")] = 20,
 ) -> str:
-    """Full-text search the local RIS index for laws that mention a given citation.
-
-    Reverse citation lookup: finds provisions that cite the one you name.
-    Backed by a locally built FTS index, so it is only registered where that
-    index exists.
-    """
+    """Reverse citation lookup: provisions that cite the one named."""
     # SQLite treats a negative LIMIT as unbounded, so -1 would return the whole match set.
     limit = max(1, min(limit, 100))
 

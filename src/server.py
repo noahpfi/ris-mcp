@@ -6,9 +6,10 @@ import logging
 import math
 import re
 from datetime import date as Date
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import anyio
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
@@ -17,7 +18,6 @@ from starlette.responses import JSONResponse
 from . import config
 from . import http_app
 from . import ris_client as rc
-from . import sections
 from .content import html_to_markdown, extract_metadata_blocks, outline_version, parse_law_outline
 from . import index as fts_index
 
@@ -29,7 +29,23 @@ MAX_RANGE = 20
 # Pages of 100 per range query. Twenty numbers with their suffix variants and transitional provisions stay far
 # below 300 documents.
 MAX_UNIT_PAGES = 3
-CITATION_FORMS = "1295, § 879a, Art. 7, Anl. 1 or Art. 10 § 1"
+# RIS compares Abschnitt bounds by their leading number; a suffix such as a or m1 may follow.
+_ABSCHNITT = re.compile(r"(\d+)[A-Za-z0-9]*")
+NUMBER_PARAM = (
+    "Number of the unit as RIS files it, optionally with its suffix, sent to RIS as Abschnitt.Von. "
+    "Convert the citation yourself. Examples: § 1295 ABGB -> 1295; § 879a -> 879a; § 365m1 -> 365m1; "
+    "Art. 7 B-VG -> 7; Artikel VII -> 7; Anlage 1 or Anhang 1 -> 1; Art. 10 § 1 -> 1 with kind Paragraph; "
+    "§ 1 Abs. 2 Z 3 -> 1, since RIS holds no document below the unit. Section headings such as Abschnitt or "
+    "Hauptstück are not units; find them with get_law_outline."
+)
+TO_PARAM = (
+    f"End of a range, sent as Abschnitt.Bis, at most {MAX_RANGE} numbers after number. Empty means number "
+    "alone. Example: §§ 200 to 210 -> number 200, to 210."
+)
+KIND_PARAM = (
+    "Abschnitt.Typ, the kind of unit: Paragraph for §, Artikel for Art., Anlage for annexes, also when the law "
+    "calls them Anhang. Empty means every kind; use it when unsure, for example when a law numbers by article."
+)
 
 # CC BY 4.0 requires attribution when the data is passed on, and only the gazette wording is binding. The note
 # travels with each response because the end user never sees the website.
@@ -128,11 +144,11 @@ SEARCH_PAGE_SIZE = 50
 
 @mcp.tool()
 async def search_law(
-    query: Annotated[str, "Full-text search terms"],
-    law: Annotated[str, f"Optional, scopes the search to one law. {LAW_PARAM}"] = "",
-    page: Annotated[int, f"Result page, {SEARCH_PAGE_SIZE} hits each"] = 1,
-    pick: Annotated[str, PICK_PARAM] = "",
-    date: Annotated[str, DATE_PARAM] = "",
+    query: Annotated[str, Field(description="Full-text search terms")],
+    law: Annotated[str, Field(description=f"Optional, scopes the search to one law. {LAW_PARAM}")] = "",
+    page: Annotated[int, Field(description=f"Result page, {SEARCH_PAGE_SIZE} hits each")] = 1,
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
     """Search Austrian federal law (Bundesrecht) by keyword, optionally scoped to one statute.
 
@@ -184,57 +200,45 @@ async def search_law(
     return _sourced("\n".join(lines))
 
 
-async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: str) -> str:
+async def _units(law: str, pick: str, number: str, to: str, kind: str, date: str) -> str:
     """Serves get_paragraph.
 
-    1. Parse the citation and range, and refuse ranges wider than MAX_RANGE numbers before any request.
+    1. Check that the bounds start with a number and span at most MAX_RANGE numbers, before any request.
     2. Lead the law name to its Gesetzesnummer.
-    3. Send one Abschnitt query: the number and suffix of each end, and the kind given, or Alle for a bare
-       number. RIS compares numbers only, so the answer may hold more than the citation names.
-    4. Split the answer without dropping anything. A single citation with a kind gets full text for the labels
-       equal to it; a bare number or a range gets full text for everything inside its enclosing units. Every
-       other document RIS returned is listed by label.
+    3. Send the bounds and kind to RIS as given, Alle when no kind is given. RIS compares numbers only, so
+       § 5 also returns § 5a to § 5d and an article's § 1 next to the law's own § 1.
+    4. Return full text for what RIS sent, in RIS order, up to MAX_RANGE documents, and list the rest by label.
     """
-    start = sections.parse(paragraph)
-    end = sections.end_of_range(start, to_paragraph) if start and to_paragraph else start
-    if start is None or end is None:
-        return f"Cannot read '{paragraph}{' to ' + to_paragraph if to_paragraph else ''}' as a citation. Use forms like {CITATION_FORMS}."
-    same_container = [u.key for u in end.outer] == [u.key for u in start.outer]
-    if not same_container or end.last.kind != start.last.kind or end.last.key < start.last.key:
-        return f"Range {start} to {end} does not run forward within one kind of unit."
-    span = end.last.number - start.last.number + 1
+    number, to = number.strip(), to.strip()
+    low, high = _ABSCHNITT.fullmatch(number), _ABSCHNITT.fullmatch(to or number)
+    if not low or not high:
+        return f"'{number}'{f' to {to!r}' if to else ''} is not a unit number. {NUMBER_PARAM}"
+    span = int(high.group(1)) - int(low.group(1)) + 1
+    if span < 1:
+        return f"Range {number} to {to} runs backwards."
     if span > MAX_RANGE:
-        return (
-            f"Range {start} to {end} covers {span} numbers; the limit is "
-            f"{MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
-        )
+        return f"Range {number} to {to} covers {span} numbers; the limit is {MAX_RANGE} per call. Narrow it, or use get_law_outline for an overview."
 
     resolution = await _resolve(law, pick, date)
     if isinstance(resolution, str):
         return resolution
 
+    typ = kind or "Alle"
     refs, total = await rc.search_bundesrecht_pages(
         MAX_UNIT_PAGES,
         gesetzesnummer=resolution.law.number,
-        abschnitt_von=start.last.query,
-        abschnitt_bis=end.last.query,
-        abschnitt_typ=start.abschnitt_typ,
+        abschnitt_von=number,
+        abschnitt_bis=to or number,
+        abschnitt_typ=typ,
         fassung_vom=date,
     )
-    exact = start == end and not start.implicit
-    named = [r for r in refs if (start.names if exact else start.contains)(rc._meta_from_ref(r)["paragraph"])]
-    rest = [r for r in refs if not any(r is n for n in named)]
-    wanted = f"{start}" if start == end else f"{start} to {end}"
-    cut = f" RIS holds {total} documents for this query; the first {len(refs)} were read." if len(refs) < total else ""
+    asked = f"Abschnitt {number}{f' to {to}' if to else ''}, Typ {typ}"
+    cut = f"RIS holds {total} documents for {asked}; the first {len(refs)} were read." if len(refs) < total else ""
+    if not refs:
+        return f"RIS returned no document of {resolution.law.short_title} in force {rc._when(date)} for {asked}."
 
-    if not named:
-        line = f"No {wanted} in {resolution.law.short_title} in force {rc._when(date)}."
-        if refs:
-            line += f" RIS returned for {wanted}: {_labels(refs)}."
-        return line + cut
-
-    shown, later = named[:MAX_RANGE], named[MAX_RANGE:]
-    parts = [rc.describe_resolution(resolution), ""]
+    shown, later = refs[:MAX_RANGE], refs[MAX_RANGE:]
+    parts = [rc.describe_resolution(resolution), "", f"*RIS returned {total} documents for {asked}.*", ""]
     as_of = "" if date == rc.today() else f" (as of {date})"
     # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff then pushes a
     # 15-paragraph range past 60 seconds.
@@ -250,12 +254,9 @@ async def _units(law: str, pick: str, paragraph: str, to_paragraph: str, date: s
         parts.append(f"URL: {meta['doc_url']}")
         parts.append("")
     if later:
-        first = rc._meta_from_ref(later[0])["paragraph"]
-        parts.append(f"*{len(later)} more over the limit of {MAX_RANGE}: {_labels(later)}. Continue with paragraph={first}.*")
-    if rest:
-        parts.append(f"RIS also returned for {wanted}: {_labels(rest)}. Ask for one by its full label.")
+        parts.append(f"*{len(later)} more over the limit of {MAX_RANGE}: {_labels(later)}. Ask with a narrower number, to or kind.*")
     if cut:
-        parts.append(cut.strip())
+        parts.append(f"*{cut}*")
 
     return _sourced("\n".join(parts))
 
@@ -272,24 +273,29 @@ def _labels(refs: list[dict[str, Any]]) -> str:
 
 @mcp.tool()
 async def get_paragraph(
-    law: Annotated[str, LAW_PARAM],
-    paragraph: Annotated[str, f"Paragraph, article or annex, e.g. {CITATION_FORMS}. A bare number returns every kind RIS holds under it."],
-    to_paragraph: Annotated[str, f"End of range (optional), at most {MAX_RANGE} numbers from the start"] = "",
-    pick: Annotated[str, PICK_PARAM] = "",
-    date: Annotated[str, DATE_PARAM] = "",
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    number: Annotated[str, Field(description=NUMBER_PARAM)],
+    to: Annotated[str, Field(description=TO_PARAM)] = "",
+    kind: Annotated[Literal["", "Paragraph", "Artikel", "Anlage"], Field(description=KIND_PARAM)] = "",
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
-    """Fetch one paragraph, article or annex, or a range of them, from an Austrian law as in force on a date."""
+    """Fetch paragraphs, articles or annexes of an Austrian law by number, as in force on a date.
+
+    Convert the citation into number, to and kind first; RIS takes no citation text. RIS compares numbers
+    only, so the answer can hold more documents than the citation names, each under its RIS label.
+    """
     iso = _iso_date(date)
     if iso is None:
         return DATE_ERROR.format(date)
-    return await _units(law, pick, paragraph, to_paragraph, iso)
+    return await _units(law, pick, number, to, kind, iso)
 
 
 @mcp.tool()
 async def get_statute(
-    name: Annotated[str, LAW_PARAM],
-    pick: Annotated[str, PICK_PARAM] = "",
-    date: Annotated[str, DATE_PARAM] = "",
+    name: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
     """Fetch the preamble and the first paragraphs or articles of a law as in force on a date."""
     iso = _iso_date(date)
@@ -328,9 +334,9 @@ async def get_statute(
 
 @mcp.tool()
 async def get_law_outline(
-    law: Annotated[str, LAW_PARAM],
-    pick: Annotated[str, PICK_PARAM] = "",
-    date: Annotated[str, DATE_PARAM] = "",
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
     """Return the table of contents of a law as RIS lists it: each document's label with its headings, and section headings.
 
@@ -378,7 +384,7 @@ _BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b")
 
 @mcp.tool()
 async def lookup_bgbl(
-    reference: Annotated[str, "BGBl reference with Teil, e.g. 'BGBl. I Nr. 50/2023', 'II 50/2023'; without Teil all three are listed"],
+    reference: Annotated[str, Field(description="BGBl reference with Teil, e.g. 'BGBl. I Nr. 50/2023', 'II 50/2023'; without Teil all three are listed")],
 ) -> str:
     """Look up an authentic Bundesgesetzblatt entry and return its metadata and text."""
     # Reads Teil, number and year. A number/year exists once per Teil, so without a Teil all three are
@@ -425,9 +431,9 @@ async def lookup_bgbl(
 
 @mcp.tool()
 async def get_amendment_timeline(
-    law: Annotated[str, LAW_PARAM],
-    pick: Annotated[str, PICK_PARAM] = "",
-    date: Annotated[str, DATE_PARAM] = "",
+    law: Annotated[str, Field(description=LAW_PARAM)],
+    pick: Annotated[str, Field(description=PICK_PARAM)] = "",
+    date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
     """Return the amendments RIS lists for a law, as of a date, in RIS's order."""
     iso = _iso_date(date)
@@ -449,8 +455,8 @@ def _amendments(meta: dict[str, Any]) -> str:
 
 
 async def who_mentions(
-    reference: Annotated[str, "Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'"],
-    limit: Annotated[int, "Max results to return (1-100, default 20)"] = 20,
+    reference: Annotated[str, Field(description="Citation string to search for, e.g. '§ 1295 ABGB' or 'Art. 7 B-VG'")],
+    limit: Annotated[int, Field(description="Max results to return (1-100, default 20)")] = 20,
 ) -> str:
     """Full-text search the local RIS index for laws that mention a given citation.
 

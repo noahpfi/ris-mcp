@@ -7,7 +7,7 @@ MCP server for Austrian federal law (Bundesrecht), backed by the public [RIS](ht
 | Tool | Purpose | Hosted |
 |---|---|---|
 | `search_law` | Full-text search across Bundesrecht in force on a date, newest first | ✓ |
-| `get_paragraph` | Fetch a paragraph, article or annex, or a range such as §§ 200–210 UGB, as in force on a date | ✓ |
+| `get_paragraph` | Fetch paragraphs, articles or annexes by number, or a range such as §§ 200–210 UGB, as in force on a date | ✓ |
 | `get_statute` | Preamble, amendments and first paragraphs of a law | ✓ |
 | `get_law_outline` | Every document of a law under its RIS label, with headings and sections | ✓ |
 | `lookup_bgbl` | Text and metadata of a BGBl entry, e.g. `BGBl. I Nr. 50/2023` | ✓ |
@@ -22,7 +22,25 @@ When exactly one hit carries the name as its abbreviation or short title, a trai
 
 `date` reads a law as in force on that day, today if empty. A repealed law is found only with a date from its time in force.
 
-`get_paragraph` takes `1295`, `§ 879a`, `Art. 7`, `Anl. 1/ThNa` or `Art. 10 § 1`, and an optional end of range. A bare number returns every kind RIS holds under it. Documents RIS returns beyond the citation are listed by label, so nothing is dropped.
+`get_paragraph` takes RIS's own parameters rather than citation text, and the calling model converts the citation:
+
+- `number`, the unit number with its suffix, sent to RIS as `Abschnitt.Von`
+- `to`, the optional end of a range, at most 20 numbers further
+- `kind`, one of `Paragraph`, `Artikel` or `Anlage`, or empty for every kind
+
+Examples:
+
+| Citation | number | to | kind |
+|---|---|---|---|
+| § 1295 ABGB | `1295` | | `Paragraph` |
+| § 879a | `879a` | | `Paragraph` |
+| Art. 7 B-VG, Artikel VII | `7` | | `Artikel` |
+| Anlage 1, Anhang 1 | `1` | | `Anlage` |
+| Art. 10 § 1 | `1` | | `Paragraph` |
+| § 1 Abs. 2 Z 3 | `1` | | `Paragraph` |
+| §§ 200–210 UGB | `200` | `210` | `Paragraph` |
+
+RIS compares numbers only, so `5` also returns § 5a to § 5d, and § 1 of a law also returns the § 1 inside its articles. Every document RIS returns comes back under its RIS label, full text for the first 20 and the rest listed. Section headings such as Abschnitt or Hauptstück are not units; `get_law_outline` shows them.
 
 ## Hosted
 

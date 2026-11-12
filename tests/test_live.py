@@ -60,18 +60,18 @@ async def test_bgbl_before_the_authentic_gazette_is_asked_and_explained():
 
 
 async def test_paragraph_comes_from_the_named_law_not_a_regulation_citing_it():
-    out = await server.get_paragraph(law="EStG", paragraph="1")
+    out = await server.get_paragraph(law="EStG", number="1", kind="Paragraph")
     assert _headings(out)[0].startswith("Einkommensteuergesetz 1988 § 1")
     assert out.endswith(server.SOURCE_CONSOLIDATED)
 
 
 async def test_historical_paragraph_uses_the_requested_date():
-    out = await server.get_paragraph(law="EStG", paragraph="1", date="2020-01-01")
+    out = await server.get_paragraph(law="EStG", number="1", kind="Paragraph", date="2020-01-01")
     assert _headings(out)[0] == "Einkommensteuergesetz 1988 § 1 (as of 2020-01-01)"
 
 
 async def test_bare_number_reaches_articles():
-    assert _headings(await server.get_paragraph(law="B-VG", paragraph="7"))[0] == "Bundes-Verfassungsgesetz Art. 7"
+    assert _headings(await server.get_paragraph(law="B-VG", number="7"))[0] == "Bundes-Verfassungsgesetz Art. 7"
 
 
 @pytest.mark.parametrize("tool, args", [
@@ -123,9 +123,9 @@ async def test_unknown_name_says_what_was_sent():
 async def test_repealed_law_is_reached_with_its_date():
     """KO was replaced by IO; both carry Gesetzesnummer 10001736, and RIS names the old version by the new title."""
     assert "RIS found no law in force today for 'KO'" in await server.get_statute(name="KO")
-    listed = await server.get_paragraph(law="KO", paragraph="1", date="2005-01-01")
+    listed = await server.get_paragraph(law="KO", number="1", kind="Paragraph", date="2005-01-01")
     assert "- Insolvenzordnung (IO): 10001736" in listed
-    out = await server.get_paragraph(law="KO", paragraph="1", date="2005-01-01", pick="10001736")
+    out = await server.get_paragraph(law="KO", number="1", kind="Paragraph", date="2005-01-01", pick="10001736")
     assert _headings(out)[0] == "Insolvenzordnung § 1 (as of 2005-01-01)"
 
 
@@ -134,49 +134,37 @@ def _shown(out: str, title: str) -> list[str]:
     return [h[len(title) + 1:] for h in _headings(out) if h.startswith(title + " ")]
 
 
-async def test_single_citation_gets_its_own_text_and_lists_the_rest():
-    out = await server.get_paragraph(law="ABGB", paragraph="§ 1")
-    assert _shown(out, "Allgemeines bürgerliches Gesetzbuch") == ["§ 1"]
-    assert "RIS also returned for § 1: Art. 10 § 1 [ÜR], Art. 18 § 1 [ÜR]." in out
+async def test_every_document_ris_returns_gets_its_text():
+    """RIS compares numbers only: ABGB § 1 also returns the § 1 of two transitional articles."""
+    out = await server.get_paragraph(law="ABGB", number="1", kind="Paragraph")
+    assert _shown(out, "Allgemeines bürgerliches Gesetzbuch") == ["§ 1", "Art. 10 § 1 [ÜR]", "Art. 18 § 1 [ÜR]"]
+    assert "*RIS returned 3 documents for Abschnitt 1, Typ Paragraph.*" in out
     assert "\nURL: https://" in out
 
 
-async def test_suffixed_neighbours_are_listed_not_dropped():
-    out = await server.get_paragraph(law="KSchG", paragraph="§ 5")
-    assert _shown(out, "Konsumentenschutzgesetz") == ["§ 5"]
-    assert "§ 5a" in out.split("RIS also returned for § 5:")[1]
-
-
-async def test_label_with_letter_and_digit_suffix_is_reachable():
-    out = await server.get_paragraph(law="GewO", pick="10007517", paragraph="§ 365m1")
+async def test_suffix_bound_narrows_to_that_unit():
+    out = await server.get_paragraph(law="GewO", pick="10007517", number="365m1", kind="Paragraph")
     assert _shown(out, "Gewerbeordnung 1994") == ["§ 365m1"]
 
 
-async def test_bare_number_returns_every_kind():
-    out = await server.get_paragraph(law="KSchG", paragraph="1")
-    shown = _shown(out, "Konsumentenschutzgesetz")
+async def test_number_alone_also_returns_its_suffixed_units():
+    shown = _shown(await server.get_paragraph(law="KSchG", number="5", kind="Paragraph"), "Konsumentenschutzgesetz")
+    assert shown[:2] == ["§ 5", "§ 5a"]
+
+
+async def test_empty_kind_returns_every_kind():
+    shown = _shown(await server.get_paragraph(law="KSchG", number="1"), "Konsumentenschutzgesetz")
     assert "§ 1" in shown and "Anl. 1" in shown and any(label.startswith("Art. 1 [") for label in shown)
 
 
-async def test_range_inside_an_article():
-    out = await server.get_paragraph(law="DSG", paragraph="Art. 2 § 4", to_paragraph="6")
+async def test_paragraphs_inside_an_article_are_reached_by_their_number():
+    out = await server.get_paragraph(law="DSG", number="4", to="6", kind="Paragraph")
     assert _shown(out, "Datenschutzgesetz") == ["Art. 2 § 4", "Art. 2 § 5", "Art. 2 § 6"]
 
 
-async def test_range_returns_what_ris_holds_between_the_numbers():
-    out = await server.get_paragraph(law="KSchG", paragraph="5", to_paragraph="6")
-    shown = _shown(out, "Konsumentenschutzgesetz")
-    assert shown[0] == "§ 5" and "§ 5a" in shown and "§ 6" in shown
-
-
-async def test_miss_lists_everything_ris_returned():
-    """DSG keeps its paragraphs inside Art. 1 and Art. 2."""
-    out = await server.get_paragraph(law="DSG", paragraph="§ 1")
-    assert out.startswith("No § 1 in Datenschutzgesetz in force today. RIS returned for § 1: Art. 1 § 1")
-
-
-async def test_miss_with_nothing_returned_says_so():
-    assert await server.get_paragraph(law="KSchG", paragraph="§ 99") == "No § 99 in Konsumentenschutzgesetz in force today."
+async def test_nothing_returned_says_what_was_asked():
+    out = await server.get_paragraph(law="KSchG", number="99", kind="Paragraph")
+    assert out == "RIS returned no document of Konsumentenschutzgesetz in force today for Abschnitt 99, Typ Paragraph."
 
 
 async def _api_labels(number: str, date: str) -> list[str]:

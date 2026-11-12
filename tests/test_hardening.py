@@ -9,9 +9,9 @@ from src import ris_client as rc
 from src import server
 
 
-@pytest.mark.parametrize("start, end", [("1", "1500"), ("§ 1", "§ 21"), ("Art. 1", "30")])
-async def test_wide_range_is_refused_before_any_upstream_call(no_upstream, start, end):
-    result = await server.get_paragraph(law="ABGB", paragraph=start, to_paragraph=end)
+@pytest.mark.parametrize("number, to", [("1", "1500"), ("1", "21"), ("5a", "40b")])
+async def test_wide_range_is_refused_before_any_upstream_call(no_upstream, number, to):
+    result = await server.get_paragraph(law="ABGB", number=number, to=to)
     assert "limit is" in result
 
 

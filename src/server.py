@@ -306,11 +306,8 @@ async def get_statute(
     for label in ("Kundmachungsorgan", "Typ", "Inkrafttretensdatum", "Abkürzung", "Index"):
         if label in blocks:
             parts.append(f"**{label}:** {blocks[label]}")
-    if "Änderung" in blocks:
-        amendments = blocks["Änderung"].split("\n")
-        suffix = f" ... (+{len(amendments)-5} more)" if len(amendments) > 5 else ""
-        parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
-    parts.append("")
+    preamble_meta = rc._meta_from_ref(preamble)
+    parts.extend(["", "**Änderungen:**", _amendments(preamble_meta), f"URL: {preamble_meta['doc_url']}", ""])
 
     # Without a sort column RIS returns document order: the § 0 preamble first, transitional provisions last.
     refs, total = await rc.search_bundesrecht(
@@ -431,7 +428,7 @@ async def get_amendment_timeline(
     pick: Annotated[str, PICK_PARAM] = "",
     date: Annotated[str, DATE_PARAM] = "",
 ) -> str:
-    """Return the amendments RIS lists for a law, as of a date."""
+    """Return the amendments RIS lists for a law, as of a date, in RIS's order."""
     iso = _iso_date(date)
     if iso is None:
         return DATE_ERROR.format(date)
@@ -439,19 +436,15 @@ async def get_amendment_timeline(
     if isinstance(resolution, str):
         return resolution
 
-    blocks = extract_metadata_blocks(await rc.fetch_document_html(resolution.law.preamble))
-    short_title = blocks.get("Kurztitel", resolution.law.short_title)
-    amendments_raw = blocks.get("Änderung", "")
-
-    if not amendments_raw:
-        return f"No amendment list found for {law}."
-
-    amendments = [a.strip() for a in amendments_raw.split("\n") if a.strip()]
-    lines = [rc.describe_resolution(resolution), "", f"## Amendment timeline: {short_title}", f"*{len(amendments)} amendments total*", ""]
-    for i, a in enumerate(amendments, 1):
-        lines.append(f"{i}. {a}")
-
+    meta = rc._meta_from_ref(resolution.law.preamble)
+    lines = [rc.describe_resolution(resolution), "", f"## Amendments: {meta['short_title']}", "", _amendments(meta), "", f"URL: {meta['doc_url']}"]
     return _sourced("\n".join(lines))
+
+
+def _amendments(meta: dict[str, Any]) -> str:
+    """The Aenderung field of a preamble as RIS gives it, one line per line."""
+    lines = [line.strip() for line in meta["amendments"].splitlines() if line.strip()]
+    return "\n".join(lines) or f"RIS lists no amendments; original publication {meta['kundmachung']}."
 
 
 async def who_mentions(

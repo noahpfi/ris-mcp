@@ -206,3 +206,24 @@ async def test_outline_follows_the_date():
     out = await server.get_law_outline(law="KSchG", date="2010-01-01")
     assert "*Fassung vom 01.01.2010." in out
     assert _outline_labels(out) == await _api_labels("10002462", "2010-01-01")
+
+
+async def _aenderung(number: str) -> list[str]:
+    refs, _ = await rc.search_bundesrecht(gesetzesnummer=number, abschnitt_von="0", fassung_vom=rc.today())
+    return [line.strip() for line in rc._meta_from_ref(refs[0])["amendments"].splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("tool, args", [
+    ("get_amendment_timeline", {"law": "KSchG"}),
+    ("get_statute", {"name": "KSchG"}),
+])
+async def test_amendments_are_ris_field_line_for_line(tool, args):
+    out = await getattr(server, tool)(**args)
+    field = await _aenderung("10002462")
+    assert any(line.startswith("[CELEX") for line in field)
+    assert "\n".join(field) in out
+
+
+async def test_law_without_amendments_names_its_original_publication():
+    out = await server.get_amendment_timeline(law="Grenzkontrollstellen", pick="10005356")
+    assert "RIS lists no amendments; original publication BGBl. Nr. 105/1970." in out

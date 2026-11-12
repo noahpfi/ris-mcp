@@ -170,6 +170,7 @@ def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
         "paragraph": brkons.get("ArtikelParagraphAnlage", ""),
         "paragraph_number": brkons.get("Paragraphnummer", ""),
         "kundmachung": brkons.get("Kundmachungsorgan", ""),
+        "amendments": brkons.get("Aenderung", ""),
         "in_force_from": brkons.get("Inkrafttretensdatum", ""),
         "repealed": repealed,
         "valid_until": "" if repealed else expiry,

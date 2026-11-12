@@ -32,3 +32,5 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = ["live: calls the real RIS API; run with -m live"]
+addopts = "-m 'not live'"

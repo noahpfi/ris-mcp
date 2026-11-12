@@ -72,10 +72,11 @@ All variables are optional. Defaults suit a local stdio run.
 ## Tests
 
 ```bash
-pytest
+pytest           # offline: input parsing, refusals, HTTP failure handling
+pytest -m live   # against the real RIS API
 ```
 
-Tests run offline against a temporary database.
+Everything that depends on RIS behaviour runs only in the live suite.
 
 ## Notes
 

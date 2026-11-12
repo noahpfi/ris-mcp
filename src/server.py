@@ -150,8 +150,6 @@ async def search_law(
     )
     pages = math.ceil(total / SEARCH_PAGE_SIZE)
     if not refs:
-        if total:
-            return f"Page {page} is past the last page, {pages}."
         return f"RIS found 0 documents for '{query}' in force today."
 
     more = f" Next: page={page + 1}." if page < pages else ""

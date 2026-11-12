@@ -1,17 +1,10 @@
-"""Citation addressing. RIS filters Abschnitt ranges by number, so § 5 alone also returns § 5a to § 5d,
-and transitional articles reuse § numbers."""
+"""Parsing of the citation a caller passes in, and the answers given before any request to RIS."""
 from __future__ import annotations
 
 import pytest
 
 from src import sections
 from src import server
-
-from fake_ris import FakeRis, law, ref
-
-KSCHG = ("10002462", "Konsumentenschutzgesetz", "KSchG")
-BVG = ("10000138", "Bundes-Verfassungsgesetz", "B-VG")
-DSG = ("10001597", "Datenschutzgesetz", "DSG")
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -48,83 +41,13 @@ def test_bare_range_end_inherits_kind_and_container():
     assert str(sections.end_of_range(start, "6")) == "Art. 2 § 6"
 
 
-@pytest.fixture
-def kschg(monkeypatch):
-    docs = law(*KSCHG, "§ 1", "§ 5", "§ 5a", "§ 5b", "§ 6", "§ 6a", "§ 7")
-    docs.append(ref("Art. 4 § 2", law=KSCHG[0], title=KSCHG[1], abbreviation=KSCHG[2], transitional=True))
-    return FakeRis(docs).install(monkeypatch)
+async def test_unreadable_citation_names_accepted_forms(no_upstream):
+    assert server.CITATION_FORMS in await server.get_paragraph(law="KSchG", paragraph="fünf")
 
 
-def _shown(out: str) -> list[str]:
-    return [line.split("Konsumentenschutzgesetz ", 1)[1] for line in out.splitlines() if line.startswith("### Konsumentenschutzgesetz")]
+async def test_reversed_range_is_refused(no_upstream):
+    assert "does not run forward" in await server.get_paragraph(law="KSchG", paragraph="7", to_paragraph="5")
 
 
-@pytest.mark.parametrize("start, end, expected", [
-    ("5", "", ["§ 5"]),
-    ("5a", "", ["§ 5a"]),
-    ("5", "6", ["§ 5", "§ 5a", "§ 5b", "§ 6"]),
-    ("5a", "6a", ["§ 5a", "§ 5b", "§ 6", "§ 6a"]),
-    ("§ 2", "§ 6", ["§ 5", "§ 5a", "§ 5b", "§ 6"]),
-])
-async def test_ranges_follow_natural_order_with_exact_ends(kschg, start, end, expected):
-    """live: get_paragraph for KSchG § 5 returned § 5 and § 5a to § 5d."""
-    assert _shown(await server.get_paragraph(law="KSchG", paragraph=start, to_paragraph=end)) == expected
-
-
-async def test_transitional_provision_is_dropped_unless_named(kschg):
-    assert _shown(await server.get_paragraph(law="KSchG", paragraph="2")) == []
-    assert _shown(await server.get_paragraph(law="KSchG", paragraph="Art. 4 § 2")) == ["Art. 4 § 2 (transitional)"]
-
-
-async def test_miss_lists_what_ris_holds_near_it(kschg):
-    out = await server.get_paragraph(law="KSchG", paragraph="2")
-    assert "No § 2 in Konsumentenschutzgesetz in force today." in out
-    assert "Art. 4 § 2 (transitional)" in out
-    assert "get_paragraph_at" in out
-
-
-async def test_unreadable_citation_names_accepted_forms(kschg):
-    out = await server.get_paragraph(law="KSchG", paragraph="fünf")
-    assert server.CITATION_FORMS in out
-    assert not kschg.calls
-
-
-async def test_reversed_range_is_refused(kschg):
-    out = await server.get_paragraph(law="KSchG", paragraph="7", to_paragraph="5")
-    assert "does not run forward" in out
-    assert not kschg.calls
-
-
-async def test_bare_number_falls_back_to_articles(monkeypatch):
-    """live: get_paragraph for B-VG 7 answered "No version in force", because Art. 7 is filed as an Artikel."""
-    FakeRis(law(*BVG, "Art. 7", "Art. 14", "Art. 14a", "Art. 15", "Art. 15a", "Anl. 1")).install(monkeypatch)
-    assert "### Bundes-Verfassungsgesetz Art. 7" in await server.get_paragraph(law="B-VG", paragraph="7")
-    out = await server.get_paragraph(law="B-VG", paragraph="Art. 14", to_paragraph="15")
-    assert [line.split("Verfassungsgesetz ", 1)[1] for line in out.splitlines() if line.startswith("### Bundes")] == ["Art. 14", "Art. 14a", "Art. 15"]
-    assert "### Bundes-Verfassungsgesetz Anl. 1" in await server.get_paragraph(law="B-VG", paragraph="Anlage 1")
-
-
-async def test_sub_annexes_are_addressable_and_sort_under_their_annex(monkeypatch):
-    """live: Lehrpläne AHS holds Anl. 1, then Anl. 1/e to Anl. 1/zbrgo, then Anl. 2."""
-    FakeRis(law("10008568", "Lehrpläne – allgemeinbildende höhere Schulen", "", "Anl. 1", "Anl. 1/e", "Anl. 1/ThNa", "Anl. 2")).install(monkeypatch)
-
-    def shown(out):
-        return [line.split("Schulen ", 1)[1] for line in out.splitlines() if line.startswith("### Lehrpläne")]
-
-    assert shown(await server.get_paragraph(law="10008568", paragraph="Anl. 1")) == ["Anl. 1"]
-    assert shown(await server.get_paragraph(law="10008568", paragraph="anl. 1/thna")) == ["Anl. 1/ThNa"]
-    assert shown(await server.get_paragraph(law="10008568", paragraph="Anl. 1", to_paragraph="2")) == ["Anl. 1", "Anl. 1/e", "Anl. 1/ThNa", "Anl. 2"]
-
-
-async def test_paragraph_inside_a_non_transitional_article_is_found(monkeypatch):
-    """DSG keeps its paragraphs inside Art. 1 and Art. 2 without the ÜR flag."""
-    FakeRis(law(*DSG, "Art. 1 § 1", "Art. 2 § 4", "Art. 2 § 5")).install(monkeypatch)
-    out = await server.get_paragraph(law="DSG", paragraph="1", to_paragraph="4")
-    assert "### Datenschutzgesetz Art. 1 § 1" in out and "### Datenschutzgesetz Art. 2 § 4" in out
-    assert "Art. 2 § 5" not in out
-
-
-async def test_historical_miss_does_not_point_to_itself(kschg):
-    out = await server.get_paragraph_at(law="KSchG", paragraph="99", date="2010-01-01")
-    assert "in force on 2010-01-01" in out
-    assert "get_paragraph_at" not in out
+async def test_invalid_date_is_rejected(no_upstream):
+    assert "YYYY-MM-DD" in await server.get_paragraph_at(law="EStG", paragraph="1", date="garbage")

@@ -1,4 +1,5 @@
-"""search order; live: 'Schadenersatz' = 615 hits, page-local sort showed 50 'Abkommen …' treaties labelled newest first"""
+"""Search order. RIS has no relevance ranking, so sorting has to happen upstream across all hits.
+live: "Schadenersatz" has 615 hits, and sorting one page locally showed 50 treaties labelled newest first."""
 from __future__ import annotations
 
 import pytest

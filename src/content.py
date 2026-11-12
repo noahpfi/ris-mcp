@@ -1,4 +1,4 @@
-"""HTML -> markdown conversion for RIS document content."""
+"""Converts RIS document pages to markdown and reads metadata and outlines from them."""
 from __future__ import annotations
 
 import re
@@ -6,13 +6,17 @@ from selectolax.parser import HTMLParser
 
 
 def html_to_markdown(html: str) -> str:
+    """Converts the wording of a RIS document page to markdown.
+
+    Consolidated documents keep their wording in the contentBlock headed Text, next to metadata blocks.
+    Gazette entries have no Text block, so every block is converted. A page without blocks falls back to its body text.
+    """
     tree = HTMLParser(html)
 
-    # remove sr-only spans (screen reader duplicates)
+    # Screen-reader spans repeat the visible text in spoken form.
     for node in tree.css("span.sr-only"):
         node.decompose()
 
-    # find the Text contentBlock
     text_block = None
     for block in tree.css("div.contentBlock"):
         header = block.css_first("h1.Titel")
@@ -20,7 +24,6 @@ def html_to_markdown(html: str) -> str:
             text_block = block
             break
 
-    # BgblAuth entries = one titled block, no Text block -> walk every block
     blocks = [text_block] if text_block is not None else tree.css("div.contentBlock")
     if not blocks:
         body = tree.css_first("body")
@@ -68,7 +71,12 @@ def _clean(text: str) -> str:
 
 
 def parse_law_outline(html: str) -> str:
-    """one line per document of a GeltendeFassung page, sections as bold lines, document order kept"""
+    """Builds a table of contents from a GeltendeFassung page, which holds the whole consolidated law.
+
+    Each contentBlock is one document. Its label, such as § 5a or Anl. 1, and its first heading form one line.
+    Section headings that precede the label, such as a Hauptstück, become a bold line before it.
+    Documents keep the page order.
+    """
     tree = HTMLParser(html)
     for node in tree.css("span.sr-only"):
         node.decompose()
@@ -82,7 +90,7 @@ def parse_law_outline(html: str) -> str:
             text = _clean(node.text(separator=" "))
             if not kind or not text:
                 continue
-            # G headings after label = annex inner structure, not law sections
+            # Section headings after the label belong to the inner structure of an annex, not to the law.
             if kind == "section" and not label:
                 sections.append(text)
             elif kind == "label" and not label:
@@ -101,6 +109,7 @@ _ROLES = {"GldSymbol": "label", "Anlagenbez": "label", "UeberschrPara": "heading
 
 
 def _outline_role(node) -> str:
+    """Classifies a heading by its RIS CSS class as label, heading, section or nothing."""
     for cls in (node.attributes.get("class") or "").split():
         if cls in _ROLES:
             return _ROLES[cls]
@@ -110,12 +119,12 @@ def _outline_role(node) -> str:
 
 
 def _outline_label(text: str) -> str:
-    """'Artikel 8a.' -> 'Art. 8a', '§ 1.' -> '§ 1'"""
+    """Shortens a label to citation form: "Artikel 8a." becomes "Art. 8a" and "§ 1." becomes "§ 1"."""
     return re.sub(r"^Artikel\b", "Art.", text).rstrip(".").strip()
 
 
 def extract_metadata_blocks(html: str) -> dict[str, str]:
-    """Extract all label->value pairs from contentBlock headers."""
+    """Maps each contentBlock title, such as Kurztitel or Änderung, to its paragraphs joined by newlines."""
     tree = HTMLParser(html)
     for node in tree.css("span.sr-only"):
         node.decompose()

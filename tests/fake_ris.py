@@ -1,4 +1,4 @@
-"""in-memory BrKons with semantics observed live: Titel substring, numeric Abschnitt range, paging, sort"""
+"""In-memory stand-in for the RIS BrKons search, built from behaviour observed on the live API."""
 from __future__ import annotations
 
 import re
@@ -50,11 +50,13 @@ def ref(
 
 
 def law(number: str, title: str, abbreviation: str, *labels: str, **kwargs: Any) -> list[dict[str, Any]]:
-    """§ 0 preamble plus given units, document order"""
+    """Documents of one law in document order: the § 0 preamble every law has, then the given labels."""
     return [ref(label, law=number, title=title, abbreviation=abbreviation, **kwargs) for label in ("§ 0", *labels)]
 
 
 def _in_range(label: str, typ: str, lo: str, hi: str) -> bool:
+    """RIS Abschnitt filtering: compares the last unit of the requested kind, and a bound without a suffix
+    includes all suffixes of its number, so 5 to 5 also returns 5a to 5d."""
     kind = _KIND[typ]
     units = [(k, int(n), s) for k, n, s in _UNIT.findall(label) if k == kind]
     if not units:
@@ -67,6 +69,13 @@ def _in_range(label: str, typ: str, lo: str, hi: str) -> bool:
 
 
 class FakeRis:
+    """Replaces search_bundesrecht and fetch_document_html with an in-memory law collection.
+
+    Titel matches as a substring of short title or abbreviation, Abschnitt ranges filter numerically,
+    Inkrafttretensdatum sorting applies to all hits before paging, and pages are cut at the requested size.
+    calls records each search and fetched each fetched label, so tests can assert on upstream traffic.
+    """
+
     def __init__(self, docs: list[dict[str, Any]]):
         self.docs = docs
         self.calls: list[dict[str, Any]] = []

@@ -1,4 +1,4 @@
-"""RIS MCP server, Austrian federal law for LLMs"""
+"""MCP server that serves Austrian federal law from RIS to language models."""
 from __future__ import annotations
 
 import asyncio
@@ -22,14 +22,17 @@ from .content import html_to_markdown, extract_metadata_blocks, parse_law_outlin
 from . import index as fts_index
 
 
-# get_paragraph fans out one upstream fetch per paragraph -> range = amplification lever, capped
+# get_paragraph fetches each document of a range separately, so a range lets one call trigger many upstream
+# requests. The cap applies both to the numbers a range spans and to the documents it returns.
 MAX_RANGE = 20
 
-# range query pages; 20 numbers incl suffix variants + ÜR stay far below 300 docs
+# Pages of 100 per range query. Twenty numbers with their suffix variants and transitional provisions stay far
+# below 300 documents.
 MAX_UNIT_PAGES = 3
 CITATION_FORMS = "1295, § 879a, Art. 7, Anl. 1 or Art. 10 § 1"
 
-# CC BY 4.0 requires attribution on pass-on; only gazette wording binding -> note on response, website reaches nobody
+# CC BY 4.0 requires attribution when the data is passed on, and only the gazette wording is binding. The note
+# travels with each response because the end user never sees the website.
 SOURCE_CONSOLIDATED = (
     "\n---\n*Source: RIS, Bundeskanzleramt Österreich (CC BY 4.0). Consolidated text — "
     "no guarantee of accuracy, currency or completeness; only the wording published in the "
@@ -42,7 +45,7 @@ SOURCE_AUTHENTIC = (
 
 
 def _sourced(body: str, authentic: bool = False) -> str:
-    """append source, licence, bindingness to RIS-data response"""
+    """Appends the source, licence and bindingness note to a response built from RIS data."""
     return body + (SOURCE_AUTHENTIC if authentic else SOURCE_CONSOLIDATED)
 
 
@@ -55,7 +58,7 @@ LAW_PARAM = "Law abbreviation, short title or 8-digit Gesetzesnummer, e.g. ABGB,
 
 
 async def _resolve(law: str, date: str) -> rc.Resolution | str:
-    """resolution, or answer text when name unresolvable"""
+    """Returns the resolution, or the text to answer with when the name does not resolve to one law."""
     try:
         return await rc.resolve_law(law, date)
     except rc.LawLookupError as exc:
@@ -63,7 +66,7 @@ async def _resolve(law: str, date: str) -> rc.Resolution | str:
 
 
 def _iso_date(text: str) -> str | None:
-    """RIS rejects non-ISO FassungVom with raw SOAP fault -> validate before asking"""
+    """Normalises a YYYY-MM-DD date or returns None. RIS answers any other FassungVom with a raw SOAP fault."""
     try:
         return Date.fromisoformat(text.strip()).isoformat()
     except ValueError:
@@ -71,7 +74,8 @@ def _iso_date(text: str) -> str | None:
 
 
 def _transport_security() -> TransportSecuritySettings | None:
-    """Host/Origin allowlist; FastMCP enables it only on loopback -> binding 0.0.0.0 silently drops check"""
+    """Host and Origin allowlist for public deployments. FastMCP turns this check on only for loopback hosts,
+    so binding 0.0.0.0 would run without it."""
     if not config.PUBLIC_HOSTS:
         return None
     return TransportSecuritySettings(
@@ -96,7 +100,8 @@ mcp = FastMCP(
     host=config.HOST,
     port=config.PORT,
     log_level=config.LOG_LEVEL,
-    # stateless -> dumb tunnel, no affinity; json_response keeps off SSE, suits Cloudflare proxy buffering
+    # Stateless HTTP needs no session affinity behind the tunnel. JSON responses avoid SSE, which the Cloudflare
+    # proxy buffers.
     stateless_http=True,
     json_response=True,
     transport_security=_transport_security(),
@@ -120,6 +125,9 @@ async def search_law(
     Only versions in force today are searched. RIS has no relevance ranking; hits come most
     recently entered into force first, across all pages.
     """
+    # Resolves the optional law to a Gesetzesnummer, then lets RIS sort all hits by entry into force and
+    # return the requested page. RIS has no relevance ranking, and sorting one page locally would show an
+    # arbitrary 50 hits in date order.
     if page < 1:
         return "page starts at 1."
     header = ""
@@ -131,7 +139,6 @@ async def search_law(
         header = rc.describe_resolution(resolution) + "\n"
         scope["gesetzesnummer"] = resolution.law.number
 
-    # sorted by RIS over all hits; sorting one page locally = arbitrary 50 hits in date order
     refs, total = await rc.search_bundesrecht(
         suchworte=query,
         fassung_vom=rc.today(),
@@ -161,7 +168,14 @@ async def search_law(
 
 
 async def _units(law: str, paragraph: str, to_paragraph: str, date: str, historical: bool) -> str:
-    """shared by get_paragraph + get_paragraph_at: parse citation, resolve law, select exact labels, render"""
+    """Serves get_paragraph and get_paragraph_at.
+
+    1. Parse the citation and range, and refuse ranges wider than MAX_RANGE numbers before any upstream call.
+    2. Resolve the law to its Gesetzesnummer.
+    3. Query the Abschnitt range and keep the exact labels via sections.select. A bare number is tried as §,
+       then Art., then Anl., and the first kind with matches wins.
+    4. With no match, list the labels RIS returned near the citation. Otherwise fetch and render each document.
+    """
     start = sections.parse(paragraph)
     end = sections.end_of_range(start, to_paragraph) if start and to_paragraph else start
     if start is None or end is None:
@@ -220,7 +234,8 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
         parts.append(f"*RIS returned more than {MAX_UNIT_PAGES * 100} documents for this range; narrow it to see all.*\n")
 
     as_of = f" (as of {date})" if historical else ""
-    # sequential on purpose; concurrent fetch -> RIS throttling, 15-paragraph range > 60s via _get_html backoff
+    # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff in _get_html then pushes a
+    # 15-paragraph range past 60 seconds.
     for ref in picked:
         meta = rc._meta_from_ref(ref)
         text = html_to_markdown(await rc.fetch_document_html(ref))
@@ -236,6 +251,7 @@ async def _units(law: str, paragraph: str, to_paragraph: str, date: str, histori
 
 
 def _label(ref: dict[str, Any]) -> str:
+    """The RIS label of a document, marked when it is a transitional provision that reuses a § number."""
     meta = rc._meta_from_ref(ref)
     return meta["paragraph"] + (" (transitional)" if meta["transitional"] else "")
 
@@ -284,7 +300,7 @@ async def get_statute(
         parts.append(f"\n**Änderungen ({len(amendments)}):** {', '.join(amendments[:5])}{suffix}")
     parts.append("")
 
-    # default order = document order, § 0 first, transitional provisions last
+    # Without a sort column RIS returns document order: the § 0 preamble first, transitional provisions last.
     refs, total = await rc.search_bundesrecht(
         gesetzesnummer=resolution.law.number, fassung_vom=rc.today(), pro_seite="Ten"
     )
@@ -325,10 +341,12 @@ async def get_law_outline(
     return _sourced(f"{rc.describe_resolution(resolution)}\n\n# {meta['short_title']} — Table of Contents\n\n{outline}")
 
 
-# authentic gazette text per call, picked by feel; long amending acts run past 100k chars, link carries the rest
+# Characters of gazette text per answer, picked by feel. Long amending acts exceed 100k characters, and the URL
+# carries the full entry.
 BGBL_TEXT_LIMIT = 6000
-# BgblAuth starts 2004; older gazettes = scanned PDFs outside this API
+# The authentic gazette in BgblAuth starts in 2004. Older issues are scanned PDFs outside this API.
 BGBL_AUTH_FROM = 2004
+# Optional Teil as I, II or III, optional "Nr.", then number/year.
 _BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b")
 
 
@@ -337,6 +355,9 @@ async def lookup_bgbl(
     reference: Annotated[str, "BGBl reference with Teil, e.g. 'BGBl. I Nr. 50/2023', 'II 50/2023'; without Teil all three are listed"],
 ) -> str:
     """Look up an authentic Bundesgesetzblatt entry and return its metadata and text."""
+    # Reads Teil, number and year. A number/year exists once per Teil, so without a Teil all three are
+    # searched and several hits are listed for the caller to choose. One hit returns its metadata and its
+    # text up to BGBL_TEXT_LIMIT.
     match = _BGBL.search(reference)
     if not match:
         return f"Could not read a BGBl number from '{reference}'. Use a form like 'BGBl. I Nr. 50/2023'."
@@ -411,10 +432,10 @@ async def who_mentions(
     Backed by a locally built FTS index, so it is only registered where that
     index exists.
     """
-    # negative LIMIT = unbounded in SQLite -> clamp, else -1 returns whole match set
+    # SQLite treats a negative LIMIT as unbounded, so -1 would return the whole match set.
     limit = max(1, min(limit, 100))
 
-    # SQLite blocks, FTS5 full scan slow -> off event loop or every request stalls
+    # SQLite calls block and an FTS5 scan can be slow, so they run in a thread to keep other requests moving.
     count = await asyncio.to_thread(fts_index.doc_count)
     if count == 0:
         return (
@@ -441,7 +462,7 @@ async def who_mentions(
     return _sourced("\n".join(lines))
 
 
-# registered last, conditionally; hosted runs index-free, hidden tool beats always-unavailable one
+# Hosted instances run without the index, and hiding the tool there beats offering one that always fails.
 if config.index_enabled():
     mcp.add_tool(who_mentions)
 

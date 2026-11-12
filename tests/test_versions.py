@@ -1,4 +1,4 @@
-"""version selection, no network; RIS returns every historical version unless FassungVom set"""
+"""Version selection. RIS returns every historical version of a document unless FassungVom is set. No network."""
 from __future__ import annotations
 
 import pytest
@@ -27,7 +27,7 @@ def test_past_expiry_is_repealed(monkeypatch):
 
 
 def test_future_expiry_is_still_live(monkeypatch):
-    """§ 21 UStG 1994 carries expiry 2026-12-31 while in force; old check flagged it repealed"""
+    """§ 21 UStG 1994 carries the expiry 2026-12-31 while still in force."""
     monkeypatch.setattr(rc, "today", lambda: "2026-09-30")
     meta = rc._meta_from_ref(_ref(paragraph="§ 21", expiry="2026-12-31"))
     assert meta["repealed"] == ""
@@ -35,7 +35,7 @@ def test_future_expiry_is_still_live(monkeypatch):
 
 
 def test_expiry_today_is_still_live(monkeypatch):
-    """expiry = last day in force"""
+    """The expiry date is the last day in force."""
     monkeypatch.setattr(rc, "today", lambda: "2026-09-30")
     assert rc._meta_from_ref(_ref(expiry="2026-09-30"))["repealed"] == ""
 
@@ -56,7 +56,8 @@ LIVE_LOOKUPS = [
 
 @pytest.mark.parametrize("tool, args", LIVE_LOOKUPS)
 async def test_live_lookups_ask_ris_for_versions_valid_today(monkeypatch, tool, args):
-    """without FassungVom first 50 hits of UStG 'Kleinunternehmer' hold 0 live versions, live § 6 never fetched"""
+    """live: without FassungVom the first 50 UStG hits for "Kleinunternehmer" held no version in force,
+    and the current § 6 was never reached."""
     calls = []
 
     async def spy(**kwargs):

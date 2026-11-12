@@ -1,4 +1,5 @@
-"""outline from GeltendeFassung markup; live parser dropped § 879a, unheaded §§, EStG § 1 and every article title"""
+"""Outline built from GeltendeFassung markup. Every document is listed, including suffixed paragraphs such as
+§ 879a, paragraphs without a heading, annexes and article titles."""
 from __future__ import annotations
 
 from src.content import parse_law_outline

@@ -1,4 +1,5 @@
-"""citation addressing; RIS Abschnitt range is numeric, § 5 alone also returns 5a-5d, transitional articles reuse § numbers"""
+"""Citation addressing. RIS filters Abschnitt ranges by number, so § 5 alone also returns § 5a to § 5d,
+and transitional articles reuse § numbers."""
 from __future__ import annotations
 
 import pytest
@@ -66,7 +67,7 @@ def _shown(out: str) -> list[str]:
     ("§ 2", "§ 6", ["§ 5", "§ 5a", "§ 5b", "§ 6"]),
 ])
 async def test_ranges_follow_natural_order_with_exact_ends(kschg, start, end, expected):
-    """live: get_paragraph(KSchG, 5) returned §§ 5, 5a-5d"""
+    """live: get_paragraph for KSchG § 5 returned § 5 and § 5a to § 5d."""
     assert _shown(await server.get_paragraph(law="KSchG", paragraph=start, to_paragraph=end)) == expected
 
 
@@ -95,7 +96,7 @@ async def test_reversed_range_is_refused(kschg):
 
 
 async def test_bare_number_falls_back_to_articles(monkeypatch):
-    """live: get_paragraph(B-VG, 7) = 'No version in force', Art. 7 only reachable as Artikel"""
+    """live: get_paragraph for B-VG 7 answered "No version in force", because Art. 7 is filed as an Artikel."""
     FakeRis(law(*BVG, "Art. 7", "Art. 14", "Art. 14a", "Art. 15", "Art. 15a", "Anl. 1")).install(monkeypatch)
     assert "### Bundes-Verfassungsgesetz Art. 7" in await server.get_paragraph(law="B-VG", paragraph="7")
     out = await server.get_paragraph(law="B-VG", paragraph="Art. 14", to_paragraph="15")
@@ -104,7 +105,7 @@ async def test_bare_number_falls_back_to_articles(monkeypatch):
 
 
 async def test_sub_annexes_are_addressable_and_sort_under_their_annex(monkeypatch):
-    """live: Lehrpläne AHS holds Anl. 1, Anl. 1/e … Anl. 1/zbrgo, Anl. 2"""
+    """live: Lehrpläne AHS holds Anl. 1, then Anl. 1/e to Anl. 1/zbrgo, then Anl. 2."""
     FakeRis(law("10008568", "Lehrpläne – allgemeinbildende höhere Schulen", "", "Anl. 1", "Anl. 1/e", "Anl. 1/ThNa", "Anl. 2")).install(monkeypatch)
 
     def shown(out):
@@ -116,7 +117,7 @@ async def test_sub_annexes_are_addressable_and_sort_under_their_annex(monkeypatc
 
 
 async def test_paragraph_inside_a_non_transitional_article_is_found(monkeypatch):
-    """DSG keeps its §§ inside Art. 1 / Art. 2 without the ÜR flag"""
+    """DSG keeps its paragraphs inside Art. 1 and Art. 2 without the ÜR flag."""
     FakeRis(law(*DSG, "Art. 1 § 1", "Art. 2 § 4", "Art. 2 § 5")).install(monkeypatch)
     out = await server.get_paragraph(law="DSG", paragraph="1", to_paragraph="4")
     assert "### Datenschutzgesetz Art. 1 § 1" in out and "### Datenschutzgesetz Art. 2 § 4" in out

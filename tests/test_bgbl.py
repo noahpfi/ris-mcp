@@ -1,4 +1,5 @@
-"""gazette lookup; live: 'BGBl II Nr. 50/2023' returned BGBl I 50/2023, entry text never shown"""
+"""Gazette lookup. A number/year exists once per Teil. live: "BGBl II Nr. 50/2023" returned BGBl I 50/2023,
+and the entry text was not shown."""
 from __future__ import annotations
 
 import pytest

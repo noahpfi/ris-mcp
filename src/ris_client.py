@@ -1,4 +1,4 @@
-"""RIS OGD API v2.6 client, base https://data.bka.gv.at/ris/api/v2.6/"""
+"""Client for the RIS OGD API v2.6 at https://data.bka.gv.at/ris/api/v2.6/ and the document pages it links to."""
 from __future__ import annotations
 
 import asyncio
@@ -26,12 +26,14 @@ _VIENNA = ZoneInfo("Europe/Vienna")
 _cache: TTLCache = TTLCache(maxsize=512, ttl=3600)
 _http: httpx.AsyncClient | None = None
 
-# caps RIS in-flight requests vs unbounded public inbound; held per request, not during backoff
+# Caps concurrent requests to RIS, since inbound public traffic is unbounded. A slot is held for one request
+# and released while a retry waits.
 _egress = asyncio.Semaphore(MAX_UPSTREAM)
 
 
 class RisApiError(RuntimeError):
-    """no URL/query/internals in message; FastMCP relays raised text -> would leak upstream query shape"""
+    """Raised for upstream failures. The message carries no URL, query or internals, because FastMCP relays
+    the raised text to the client and would expose the upstream query shape."""
 
 
 def _client() -> httpx.AsyncClient:
@@ -72,6 +74,7 @@ async def _get_json(params: dict[str, str]) -> dict[str, Any]:
 
 
 async def _get_html(url: str) -> str:
+    """Fetches a document page through the cache. Returns an empty string when RIS keeps answering 429 or 503."""
     key = f"html:{url}"
     if key in _cache:
         return _cache[key]
@@ -99,6 +102,7 @@ async def _get_html(url: str) -> str:
 
 
 def _extract_docs(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Returns the document references and the total hit count. RIS sends a single hit as an object, not a list."""
     result = data.get("OgdSearchResult", {})
     if "Error" in result:
         msg = result["Error"].get("Message", "Unknown RIS error")
@@ -127,17 +131,18 @@ def _html_url_from_ref(ref: dict[str, Any]) -> str | None:
 
 
 def today() -> str:
-    """ISO date in Vienna, RIS dates = Austrian calendar days, server clock may be UTC"""
+    """Today's ISO date in Vienna. RIS dates are Austrian calendar days, and the server clock may run on UTC."""
     return datetime.now(_VIENNA).date().isoformat()
 
 
 def _meta_from_ref(ref: dict[str, Any]) -> dict[str, Any]:
+    """Flattens the metadata of a consolidated-law document reference into the fields the tools use."""
     meta = ref.get("Data", {}).get("Metadaten", {})
     technisch = meta.get("Technisch", {})
     allgemein = meta.get("Allgemein", {})
     bundesrecht = meta.get("Bundesrecht", {})
     brkons = bundesrecht.get("BrKons", {})
-    # Ausserkrafttretensdatum = last day in force; future date = scheduled expiry, still live
+    # Ausserkrafttretensdatum is the last day in force. A future date is a scheduled expiry of a version still in force.
     expiry = brkons.get("Ausserkrafttretensdatum", "")
     repealed = expiry if expiry and expiry < today() else ""
 
@@ -199,7 +204,11 @@ async def search_bundesrecht(
 
 
 async def search_bundesrecht_pages(max_pages: int, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
-    """every page up to max_pages at RIS max page size; caller compares len(refs) to total for truncation"""
+    """Collects up to max_pages pages of 100 hits, the largest page RIS serves.
+
+    Returns the hits and the total RIS reports. When fewer hits than the total come back, the result was cut,
+    and the caller decides how to report that.
+    """
     refs, total = await search_bundesrecht(seite=1, pro_seite="OneHundred", **kwargs)
     for page in range(2, min(math.ceil(total / 100), max_pages) + 1):
         more, _ = await search_bundesrecht(seite=page, pro_seite="OneHundred", **kwargs)
@@ -208,7 +217,8 @@ async def search_bundesrecht_pages(max_pages: int, **kwargs: Any) -> tuple[list[
 
 
 async def search_bgbl_auth(bgbl_nummer: str, teile: tuple[int, ...] = (1, 2, 3)) -> tuple[list[dict[str, Any]], int]:
-    """number/year exists once per Teil -> 50/2023 = up to 3 gazette entries"""
+    """Searches the authentic gazette in the given Teile. A number such as 50/2023 exists once per Teil,
+    so a search over all three can return up to three entries."""
     params = {"Applikation": "BgblAuth", "Bgblnummer": bgbl_nummer, "Seitennummer": "1", "DokumenteProSeite": "Ten"}
     for teil in teile:
         params[f"Teil.SucheInTeil{teil}"] = "true"
@@ -217,6 +227,7 @@ async def search_bgbl_auth(bgbl_nummer: str, teile: tuple[int, ...] = (1, 2, 3))
 
 
 def bgbl_meta(ref: dict[str, Any]) -> dict[str, str]:
+    """Flattens the metadata of a gazette entry, including the link to its authentic PDF."""
     meta = ref.get("Data", {}).get("Metadaten", {})
     bundesrecht = meta.get("Bundesrecht", {})
     auth = bundesrecht.get("BgblAuth", {})
@@ -233,7 +244,8 @@ def bgbl_meta(ref: dict[str, Any]) -> dict[str, str]:
     }
 
 
-# one upstream call per page; B-VG = 63 preambles, widest real name seen -> 5 pages = 500 laws, past that name too vague
+# Each page is one upstream call. B-VG is the widest real name seen and matches 63 preambles; five pages hold
+# 500 laws, and a name matching more is too vague to resolve.
 MAX_RESOLVE_PAGES = 5
 AMBIGUITY_LISTED = 25
 _GESETZESNUMMER = re.compile(r"\d{8}")
@@ -241,7 +253,7 @@ _TRAILING_YEAR = re.compile(r"\s+\d{4}$")
 
 
 class LawLookupError(Exception):
-    """message = tool answer, name unresolvable or ambiguous"""
+    """Raised when a law name matches nothing or several laws. The message is the answer the tool returns."""
 
 
 @dataclass(frozen=True)
@@ -254,6 +266,8 @@ class Law:
 
 @dataclass(frozen=True)
 class Resolution:
+    """The law a name resolved to, plus laws in the same match tier, which share its abbreviation or title."""
+
     law: Law
     related: tuple[Law, ...]
 
@@ -271,7 +285,16 @@ def _undated(text: str) -> str:
 
 
 async def resolve_law(name: str, date: str) -> Resolution:
-    """name -> one Gesetzesnummer; Titel = substring search over titles + abbreviations, never queried directly"""
+    """Resolves a law name, abbreviation or Gesetzesnummer to one law in force on the given date.
+
+    1. Fetch the § 0 preamble documents that match, since every law has exactly one. RIS Titel is a substring
+       search over titles and abbreviations, so regulations that cite a law in their title match its name too.
+    2. Keep one candidate per Gesetzesnummer. A Gesetzesnummer query returns its law directly.
+    3. Pick by tier: exact abbreviation, abbreviation without its trailing year, exact short title, short title
+       without its year. The year is stripped only on the law side, so "UStG 1972" never resolves to UStG 1994.
+       Within a tier the shortest title is the main act, and the rest are listed as related.
+    4. A lone candidate is returned as is. Otherwise the error lists the candidates.
+    """
     query = _norm(name)
     if not query:
         raise LawLookupError("No law given.")
@@ -300,8 +323,6 @@ async def resolve_law(name: str, date: str) -> Resolution:
     if by_number:
         return Resolution(candidates[0], ())
 
-    # abbreviation before title, exact before omitted year; year only stripped law-side -> "UStG 1972" never hits UStG 1994
-    # shared abbreviation -> main act = shortest title, rest related
     tiers = (
         lambda law: _norm(law.abbreviation) == query,
         lambda law: _undated(_norm(law.abbreviation)) == query,
@@ -327,7 +348,7 @@ def _describe(law: Law) -> str:
 
 
 def describe_resolution(resolution: Resolution) -> str:
-    """header naming resolved law, shared-abbreviation siblings reachable via their Gesetzesnummer"""
+    """Header naming the resolved law and the related laws, which stay reachable by their Gesetzesnummer."""
     lines = [f"*Law: {_describe(resolution.law)}*"]
     if resolution.related:
         others = "; ".join(_describe(law) for law in resolution.related)

@@ -1,4 +1,5 @@
-"""law name -> one Gesetzesnummer; RIS Titel is substring search, regulations citing a law share its abbreviation in their title"""
+"""Resolving a law name to one Gesetzesnummer. RIS Titel is a substring search, so regulations that cite
+a law in their title match its abbreviation too."""
 from __future__ import annotations
 
 import pytest
@@ -38,7 +39,7 @@ async def test_shared_abbreviation_picks_main_act_and_names_the_sibling(statutes
 
 
 async def test_explicit_year_is_never_stripped_from_the_query(monkeypatch):
-    """only UStG 1994 in force; 'UStG 1972' must not silently become it"""
+    """Only UStG 1994 is in force, and "UStG 1972" must not resolve to it."""
     FakeRis(law(*USTG, "§ 6") + law("20000001", "Verordnung zum UStG 1972 und UStG 1994", "", "§ 1")).install(monkeypatch)
     resolution = await rc.resolve_law("UStG 1972", "2026-11-01")
     assert resolution.law.number != USTG[0]
@@ -56,7 +57,7 @@ async def test_unknown_name_reports_the_date(statutes):
 
 
 async def test_candidates_beyond_the_first_page_are_considered(monkeypatch):
-    """B-VG = 63 preambles; RIS order puts no guarantee on the statute being on page 1"""
+    """B-VG matches 63 preambles, and RIS order does not put the statute itself on the first page."""
     docs = [ref("§ 0", law=f"2{i:07d}", title=f"Vereinbarung {i} gemäß Art. 15a B-VG", abbreviation="") for i in range(150)]
     docs += law("10000138", "Bundes-Verfassungsgesetz", "B-VG", "Art. 7")
     FakeRis(docs).install(monkeypatch)
@@ -78,7 +79,7 @@ async def test_historical_lookup_resolves_with_the_requested_date(statutes):
 
 @pytest.mark.parametrize("tool", ["get_paragraph", "get_paragraph_at"])
 async def test_paragraph_tools_return_the_named_law_only(statutes, tool):
-    """live: get_paragraph_at(EStG, 1) returned § 1 of the Bausparen regulation"""
+    """live: get_paragraph_at for EStG § 1 returned § 1 of the Bausparen regulation."""
     args = {"law": "EStG", "paragraph": "1"} | ({"date": "2020-01-01"} if tool == "get_paragraph_at" else {})
     out = await getattr(server, tool)(**args)
     assert "Persönliche Steuerpflicht" in out

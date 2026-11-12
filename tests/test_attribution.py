@@ -1,4 +1,5 @@
-"""provenance rides on response; CC BY 4.0 attribution + only gazette binding, answer user never sees site; no network"""
+"""Each response built from RIS data carries the CC BY 4.0 attribution and the note that only the gazette
+wording is binding, because the end user never sees the website. No network."""
 from __future__ import annotations
 
 import pytest
@@ -11,7 +12,7 @@ from fake_ris import FakeRis, law
 
 @pytest.fixture
 def ris(monkeypatch):
-    """every upstream call answered locally"""
+    """Answers every upstream call from local data."""
     fake = FakeRis(law("10001622", "Allgemeines bürgerliches Gesetzbuch", "ABGB", "§ 1295", text="Schadenersatz"))
     fake.install(monkeypatch)
 
@@ -36,7 +37,7 @@ def test_consolidated_note_names_source_licence_and_what_is_binding():
 
 
 def test_authentic_note_does_not_call_the_gazette_non_binding():
-    """lookup_bgbl returns authentic text -> no not-binding note"""
+    """lookup_bgbl returns authentic gazette text, so its note must not call it non-binding."""
     assert "Consolidated" not in server.SOURCE_AUTHENTIC
     assert "CC BY 4.0" in server.SOURCE_AUTHENTIC
 
@@ -57,7 +58,7 @@ async def test_bgbl_lookup_is_marked_authentic_not_consolidated(ris):
 
 
 async def test_empty_results_carry_no_attribution(monkeypatch):
-    """nothing passed on -> nothing to attribute or disclaim"""
+    """A response that passes on no RIS data has nothing to attribute or disclaim."""
     async def nothing(**kwargs):
         return [], 0
 
@@ -75,7 +76,7 @@ async def test_empty_results_carry_no_attribution(monkeypatch):
 
 
 async def test_server_instructions_disclaim_affiliation_and_advice():
-    """client reads instructions once per session, before any tool result"""
+    """Clients read the server instructions once per session, before any tool result."""
     text = server.mcp.instructions
     assert "Not affiliated" in text
     assert "never as legal advice" in text

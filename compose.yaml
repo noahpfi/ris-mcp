@@ -9,6 +9,8 @@ services:
   ris-mcp:
     build: .
     image: ris-mcp:latest
+    # project + service name would give ris-mcp-ris-mcp-1
+    container_name: ris-mcp
     restart: unless-stopped
     environment:
       RIS_TRANSPORT: streamable-http

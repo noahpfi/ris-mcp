@@ -227,3 +227,10 @@ async def test_amendments_are_ris_field_line_for_line(tool, args):
 async def test_law_without_amendments_names_its_original_publication():
     out = await server.get_amendment_timeline(law="Grenzkontrollstellen", pick="10005356")
     assert "RIS lists no amendments; original publication BGBl. Nr. 105/1970." in out
+
+
+async def test_pick_lists_carry_no_urls_content_does():
+    hits = await server.search_law(query="Kostenvoranschlag", law="KSchG")
+    assert "URL:" not in hits.split("\n---\n")[0]
+    statute = await server.get_statute(name="KSchG")
+    assert statute.count("\nURL: https://") >= 2

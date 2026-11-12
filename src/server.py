@@ -179,7 +179,6 @@ async def search_law(
         lines.append(f"**{meta['short_title']}** {_label(ref)}{_expiry_note(meta)}")
         lines.append(f"  Document: {meta['document_id']}")
         lines.append(f"  In force: {meta['in_force_from']}")
-        lines.append(f"  URL: {meta['doc_url']}")
         lines.append("")
 
     return _sourced("\n".join(lines))
@@ -318,8 +317,10 @@ async def get_statute(
         parts.append(f"*{total} documents in force {rc._when(iso)}. Showing the first {len(body)}; get_law_outline lists all.*\n")
         htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in body])
         for ref, html in zip(body, htmls):
-            parts.append(f"### {rc._meta_from_ref(ref)['paragraph']}")
+            meta = rc._meta_from_ref(ref)
+            parts.append(f"### {meta['paragraph']}")
             parts.append(html_to_markdown(html))
+            parts.append(f"URL: {meta['doc_url']}")
             parts.append("")
 
     return _sourced("\n".join(parts))

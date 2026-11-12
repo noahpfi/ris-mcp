@@ -150,8 +150,9 @@ async def test_capitalisation_of_number_and_kind_does_not_matter():
 
 
 async def test_number_alone_returns_that_number_only():
-    shown = _shown(await server.get_paragraph(law="KSchG", number="5", kind="Paragraph"), "Konsumentenschutzgesetz")
-    assert shown == ["§ 5"]
+    out = await server.get_paragraph(law="KSchG", number="5", kind="Paragraph")
+    assert _shown(out, "Konsumentenschutzgesetz") == ["§ 5"]
+    assert "*RIS returned 1 document for Abschnitt.Von=5, Abschnitt.Typ=Paragraph.*" in out
 
 
 async def test_range_returns_suffixed_units_between_the_numbers():

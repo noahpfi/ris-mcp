@@ -230,7 +230,7 @@ async def _units(law: str, pick: str, number: str, to: str, kind: str, date: str
         return f"RIS returned no document of {resolution.law.short_title} in force {rc._when(date)} for {asked}."
 
     shown, later = refs[:MAX_TEXTS], refs[MAX_TEXTS:]
-    parts = [rc.describe_resolution(resolution), "", f"*RIS returned {total} documents for {asked}.*", ""]
+    parts = [rc.describe_resolution(resolution), "", f"*RIS returned {rc._count(total, 'document')} for {asked}.*", ""]
     as_of = "" if date == rc.today() else f" (as of {date})"
     # Fetched one at a time: concurrent fetches draw RIS throttling, and the backoff then pushes a
     # 15-paragraph range past 60 seconds.
@@ -248,7 +248,7 @@ async def _units(law: str, pick: str, number: str, to: str, kind: str, date: str
     if later:
         parts.append(f"*Full text for the first {MAX_TEXTS}; ask for these by number: {_labels(later)}.*")
     if len(refs) < total:
-        parts.append(f"*{total - len(refs)} more documents were not read; narrow with number and to.*")
+        parts.append(f"*{rc._count(total - len(refs), 'more document')} not read; narrow with number and to.*")
 
     return _sourced("\n".join(parts))
 
@@ -313,7 +313,7 @@ async def get_statute(
     )
     body = [r for r in refs if rc._meta_from_ref(r)["paragraph"] != "§ 0" and not rc._meta_from_ref(r)["transitional"]]
     if body:
-        parts.append(f"*{total} documents in force {rc._when(iso)}. Showing the first {len(body)}; get_law_outline lists all.*\n")
+        parts.append(f"*{rc._count(total, 'document')} in force {rc._when(iso)}. Showing the first {len(body)}; get_law_outline lists all.*\n")
         htmls = await asyncio.gather(*[rc.fetch_document_html(r) for r in body])
         for ref, html in zip(body, htmls):
             meta = rc._meta_from_ref(ref)
@@ -354,7 +354,7 @@ async def get_law_outline(
         rc.describe_resolution(resolution),
         "",
         f"# {meta['short_title']}, table of contents",
-        f"*{version}. RIS holds {total} documents for this law in force {rc._when(iso)}; full text per unit via get_paragraph.*",
+        f"*{version}. RIS holds {rc._count(total, 'document')} for this law in force {rc._when(iso)}; full text per unit via get_paragraph.*",
         "",
         parse_law_outline(html),
         "",
@@ -466,7 +466,7 @@ async def who_mentions(
 
     results = await asyncio.to_thread(fts_index.search_fts, reference, limit)
     if not results:
-        return f"No documents mention '{reference}' in the local index ({count} docs indexed)."
+        return f"No documents mention '{reference}' in the local index ({rc._count(count, 'document')} indexed)."
 
     lines = [f"Documents mentioning '{reference}' ({len(results)} results from {count} indexed):\n"]
     for r in results:

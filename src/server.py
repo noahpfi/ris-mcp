@@ -152,7 +152,7 @@ async def search_law(
     if not refs:
         if total:
             return f"Page {page} is past the last page, {pages}."
-        return "No results in force today. Repealed wording is reachable via get_paragraph_at."
+        return f"RIS found 0 documents for '{query}' in force today."
 
     more = f" Next: page={page + 1}." if page < pages else ""
     lines = [f"{header}Found {total} result(s) in force today, newest in force first. Page {page} of {pages}.{more}\n"]
@@ -362,14 +362,13 @@ async def lookup_bgbl(
     if not match:
         return f"Could not read a BGBl number from '{reference}'. Use a form like 'BGBl. I Nr. 50/2023'."
     teil, number, year = match.group(1), match.group(2), int(match.group(3))
-    if year < BGBL_AUTH_FROM:
-        return f"BGBl {number}/{year} predates the authentic electronic gazette, which starts in {BGBL_AUTH_FROM}."
 
     teile = (len(teil),) if teil else (1, 2, 3)
     refs, _ = await rc.search_bgbl_auth(f"{number}/{year}", teile)
     wanted = f"BGBl. {teil} Nr. {number}/{year}" if teil else f"BGBl. Nr. {number}/{year}"
     if not refs:
-        return f"{wanted} not found."
+        older = f" The authentic gazette in RIS starts in {BGBL_AUTH_FROM}." if year < BGBL_AUTH_FROM else ""
+        return f"RIS found no {wanted} in the authentic gazette.{older}"
 
     if len(refs) > 1:
         lines = [f"{wanted} exists in {len(refs)} parts of the gazette. Ask again with the Teil:"]

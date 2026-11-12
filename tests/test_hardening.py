@@ -39,45 +39,69 @@ async def test_result_fan_out_is_capped_when_suffixes_multiply_the_range(abgb):
     assert f"25 documents match § 1 to § 5; showing the first {server.MAX_RANGE}" in result
 
 
-@pytest.mark.parametrize("status", [400, 500, 503])
-async def test_upstream_errors_do_not_leak_the_request_url(monkeypatch, status):
-    """httpx puts the full query string in its exceptions, and FastMCP would relay that text."""
-    url = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht?Titel=secret&Applikation=BrKons"
+def _transport(monkeypatch, handler):
+    """Routes RIS requests to handler and skips the backoff waits."""
+    calls = []
 
-    class FakeResponse:
-        status_code = status
-        is_error = True
+    def record(request):
+        calls.append(request)
+        return handler(request)
 
-        def json(self):  # pragma: no cover, error statuses never reach json()
-            return {}
-
-    class FakeClient:
-        async def get(self, *args, **kwargs):
-            return FakeResponse()
-
-    monkeypatch.setattr(rc, "_client", lambda: FakeClient())
-    monkeypatch.setattr(rc, "_cache", {})
-
-    with pytest.raises(rc.RisApiError) as excinfo:
-        await rc._get_json({"Titel": "secret", "Applikation": "BrKons"})
-
-    message = str(excinfo.value)
-    assert str(status) in message
-    for leak in ("data.bka.gv.at", "Titel=", "secret", url):
-        assert leak not in message
-
-
-async def test_upstream_timeout_is_reported_without_internals(monkeypatch):
-    class TimingOutClient:
-        async def get(self, *args, **kwargs):
-            raise httpx.TimeoutException("timed out", request=None)
-
-    monkeypatch.setattr(rc, "_client", lambda: TimingOutClient())
+    monkeypatch.setattr(rc, "_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(record)))
     monkeypatch.setattr(rc, "_cache", {})
     monkeypatch.setattr(rc.asyncio, "sleep", lambda *_: _noop())
+    return calls
 
-    with pytest.raises(rc.RisApiError, match="timed out"):
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_throttling_is_retried_then_reported_with_attempts(monkeypatch, status):
+    calls = _transport(monkeypatch, lambda request: httpx.Response(status, headers={"Retry-After": "30"}))
+    with pytest.raises(rc.RisApiError) as excinfo:
         await rc._get_json({"Titel": "x"})
+    message = str(excinfo.value)
+    assert len(calls) == rc.ATTEMPTS
+    assert f"RIS answered {status} " in message and f"{rc.ATTEMPTS} times" in message
+    assert "Retry-After: 30" in message
+
+
+async def test_throttling_that_clears_returns_the_answer(monkeypatch):
+    answers = iter([httpx.Response(429), httpx.Response(200, json={"ok": True})])
+    _transport(monkeypatch, lambda request: next(answers))
+    assert await rc._get_json({"Titel": "x"}) == {"ok": True}
+
+
+@pytest.mark.parametrize("status", [400, 500])
+async def test_other_errors_raise_at_once_with_status_and_ris_message(monkeypatch, status):
+    body = {"OgdSearchResult": {"Error": {"Message": "Eingabe ungültig"}}}
+    calls = _transport(monkeypatch, lambda request: httpx.Response(status, json=body))
+    with pytest.raises(rc.RisApiError) as excinfo:
+        await rc._get_json({"Titel": "secret"})
+    message = str(excinfo.value)
+    assert len(calls) == 1
+    assert str(status) in message and "Eingabe ungültig" in message
+    assert "secret" not in message
+
+
+async def test_no_answer_is_reported_with_the_transport_error(monkeypatch):
+    def refuse(request):
+        raise httpx.ConnectError("refused", request=request)
+
+    _transport(monkeypatch, refuse)
+    with pytest.raises(rc.RisApiError, match=f"gave no answer, ConnectError {rc.ATTEMPTS} times"):
+        await rc._get_html("https://www.ris.bka.gv.at/doc.html")
+
+
+async def test_body_that_is_not_json_is_quoted_with_its_url(monkeypatch):
+    _transport(monkeypatch, lambda request: httpx.Response(200, text="<html>Wartung</html>"))
+    with pytest.raises(rc.RisApiError) as excinfo:
+        await rc._get_json({"Titel": "x"})
+    assert "<html>Wartung</html>" in str(excinfo.value) and rc.BASE_URL in str(excinfo.value)
+
+
+async def test_document_page_errors_raise_instead_of_returning_empty_text(monkeypatch):
+    _transport(monkeypatch, lambda request: httpx.Response(429))
+    with pytest.raises(rc.RisApiError):
+        await rc._get_html("https://www.ris.bka.gv.at/doc.html")
 
 
 async def _noop():

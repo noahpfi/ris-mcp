@@ -84,11 +84,5 @@ async def test_long_text_is_cut_with_a_notice(gazette, monkeypatch):
     assert f"cut at {server.BGBL_TEXT_LIMIT} of {server.BGBL_TEXT_LIMIT + 10} characters" in out
 
 
-@pytest.mark.parametrize("reference", ["BGBl. Nr. 60/1974", "I 99/2003"])
-async def test_pre_2004_numbers_are_answered_without_a_query(gazette, reference):
-    assert "starts in 2004" in await server.lookup_bgbl(reference=reference)
-    assert not gazette
-
-
 async def test_unreadable_reference(gazette):
     assert "Could not read" in await server.lookup_bgbl(reference="BGBl neu")

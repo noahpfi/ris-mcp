@@ -5,6 +5,7 @@ import asyncio
 import logging
 import math
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -32,8 +33,13 @@ _egress = asyncio.Semaphore(MAX_UPSTREAM)
 
 
 class RisApiError(RuntimeError):
-    """Raised for upstream failures. The message carries no URL, query or internals, because FastMCP relays
-    the raised text to the client and would expose the upstream query shape."""
+    """Raised when RIS fails a request. The message states what RIS answered and what the server already tried,
+    because FastMCP relays it to the model as the tool result."""
+
+
+# Statuses and transport errors RIS recovers from on its own. The backoff waits 1, 2 and 4 s between four tries.
+RETRY_STATUS = frozenset({429, 503})
+ATTEMPTS = 4
 
 
 def _client() -> httpx.AsyncClient:
@@ -47,66 +53,76 @@ def _client() -> httpx.AsyncClient:
     return _http
 
 
+def _ogd_error(resp: httpx.Response) -> str:
+    """The message of an OGD Error element in a JSON body, or an empty string."""
+    try:
+        error = resp.json().get("OgdSearchResult", {}).get("Error", {})
+    except ValueError:
+        return ""
+    return error.get("Message", "") if isinstance(error, dict) else ""
+
+
+async def _fetch(url: str, params: dict[str, str] | None = None) -> httpx.Response:
+    """GET with the retry policy shared by API and document requests.
+
+    Throttling, unavailability and transport errors are retried with backoff. Any other error status raises
+    at once with the status, reason and RIS's own error message. After the last try the error names the final
+    outcome, the number of tries and the time spent.
+    """
+    started = time.monotonic()
+    outcome, retry_after = "", ""
+    for attempt in range(ATTEMPTS):
+        if attempt:
+            await asyncio.sleep(2 ** (attempt - 1))
+        try:
+            async with _egress:
+                resp = await _client().get(url, params=params)
+        except httpx.TransportError as exc:
+            outcome, retry_after = f"gave no answer, {type(exc).__name__}", ""
+            continue
+        if resp.status_code in RETRY_STATUS:
+            outcome, retry_after = f"answered {resp.status_code} {resp.reason_phrase}", resp.headers.get("Retry-After", "")
+            continue
+        if resp.is_error:
+            logger.warning("RIS %s for %s", resp.status_code, resp.url)
+            detail = _ogd_error(resp)
+            raise RisApiError(f"RIS answered {resp.status_code} {resp.reason_phrase}." + (f" RIS message: {detail}" if detail else ""))
+        return resp
+    waited = time.monotonic() - started
+    after = f" RIS sent Retry-After: {retry_after}." if retry_after else ""
+    raise RisApiError(f"RIS {outcome} {ATTEMPTS} times; the server already retried with backoff over {waited:.0f} s.{after}")
+
+
 async def _get_json(params: dict[str, str]) -> dict[str, Any]:
     key = str(sorted(params.items()))
     if key in _cache:
         return _cache[key]
-
-    for attempt in range(3):
-        try:
-            async with _egress:
-                resp = await _client().get(BASE_URL, params=params)
-            if resp.status_code == 429:
-                await asyncio.sleep(2 ** attempt)
-                continue
-            if resp.is_error:
-                logger.warning("RIS API %s for params %s", resp.status_code, params)
-                raise RisApiError(f"RIS API returned HTTP {resp.status_code}.")
-            data = resp.json()
-            _cache[key] = data
-            return data
-        except httpx.TimeoutException:
-            if attempt == 2:
-                raise RisApiError("RIS API timed out.") from None
-            await asyncio.sleep(1)
-
-    raise RisApiError("RIS API unreachable after retries.")
+    resp = await _fetch(BASE_URL, params)
+    try:
+        data = resp.json()
+    except ValueError:
+        raise RisApiError(
+            f"RIS answered {resp.status_code} with a body that isn't JSON: {resp.text[:200]!r}. URL: {resp.url}"
+        ) from None
+    _cache[key] = data
+    return data
 
 
 async def _get_html(url: str) -> str:
-    """Fetches a document page through the cache. Returns an empty string when RIS keeps answering 429 or 503."""
+    """Fetches a document page through the cache."""
     key = f"html:{url}"
     if key in _cache:
         return _cache[key]
-
-    for attempt in range(5):
-        try:
-            async with _egress:
-                resp = await _client().get(url)
-            if resp.status_code in (429, 503):
-                wait = 2 ** attempt
-                await asyncio.sleep(wait)
-                continue
-            if resp.is_error:
-                logger.warning("RIS content %s for %s", resp.status_code, url)
-                raise RisApiError(f"RIS returned HTTP {resp.status_code} for a document.")
-            _cache[key] = resp.text
-            return resp.text
-        except httpx.TransportError:
-            if attempt == 4:
-                raise RisApiError("Could not reach RIS to fetch a document.") from None
-            await asyncio.sleep(2 ** attempt)
-
-    logger.warning("Skipping %s after retries", url)
-    return ""
+    resp = await _fetch(url)
+    _cache[key] = resp.text
+    return resp.text
 
 
 def _extract_docs(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Returns the document references and the total hit count. RIS sends a single hit as an object, not a list."""
     result = data.get("OgdSearchResult", {})
     if "Error" in result:
-        msg = result["Error"].get("Message", "Unknown RIS error")
-        raise ValueError(f"RIS API error: {msg}")
+        raise RisApiError(f"RIS answered with an error: {result['Error'].get('Message', result['Error'])}")
     dr = result.get("OgdDocumentResults", {})
     hits_raw = dr.get("Hits", {})
     total = int(hits_raw.get("#text", 0)) if isinstance(hits_raw, dict) else int(hits_raw)
@@ -359,7 +375,8 @@ def describe_resolution(resolution: Resolution) -> str:
 async def fetch_document_html(ref: dict[str, Any]) -> str:
     url = _html_url_from_ref(ref)
     if not url:
-        raise ValueError("No HTML URL found in document reference")
+        meta = _meta_from_ref(ref)
+        raise RisApiError(f"RIS lists no HTML version for {meta['paragraph'] or meta['document_id']}. Document: {meta['doc_url']}")
     return await _get_html(url)
 
 

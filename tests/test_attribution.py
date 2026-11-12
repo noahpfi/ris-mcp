@@ -59,7 +59,7 @@ async def test_bgbl_lookup_is_marked_authentic_not_consolidated(ris):
 
 async def test_empty_results_carry_no_attribution(monkeypatch):
     """A response that passes on no RIS data has nothing to attribute or disclaim."""
-    async def nothing(**kwargs):
+    async def nothing(*args, **kwargs):
         return [], 0
 
     monkeypatch.setattr(rc, "search_bundesrecht", nothing)

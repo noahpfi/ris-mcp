@@ -9,7 +9,7 @@ from datetime import date as Date
 from typing import Annotated, Any, Literal
 
 import anyio
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
@@ -30,10 +30,18 @@ MAX_UNIT_PAGES = 3
 NUMBER_PARAM = (
     "Unit number with its suffix. Matches every container: ABGB 1 returns § 1, Art. 10 § 1 and Art. 18 § 1. "
     "Examples: § 1295 ABGB -> 1295; § 879a -> 879a; Art. 7 B-VG or Artikel VII -> 7; Anhang 1 -> 1; "
-    "Art. 10 § 1 -> 1; § 1 Abs. 2 Z 3 -> 1. Abschnitt and Hauptstück are headings, see get_law_outline."
+    "Art. 10 § 1 -> 1; § 1 Abs. 2 Z 3 -> 1. Abschnitt and Hauptstück are headings, use get_law_outline."
 )
 TO_PARAM = "Range end, inclusive of suffixes: 5 to 6 also returns § 5a and § 6a onward."
-KIND_PARAM = "Needs number. Anlage also covers what a law calls Anhang."
+KIND_PARAM = "Needs number. Paragraph for §, Artikel for Art., Anlage for annexes, also when a law calls them Anhang."
+KINDS = ("Paragraph", "Artikel", "Anlage")
+
+
+def _kind(value: Any) -> Any:
+    """Spells a kind the way RIS requires; RIS rejects Abschnitt.Typ in any other capitalisation."""
+    if not isinstance(value, str):
+        return value
+    return {kind.casefold(): kind for kind in KINDS}.get(value.strip().casefold(), value.strip())
 
 # CC BY 4.0 requires attribution when the data is passed on, and only the gazette wording is binding. The note
 # travels with each response because the end user never sees the website.
@@ -185,11 +193,10 @@ async def search_law(
 async def _units(law: str, pick: str, number: str, to: str, kind: str, date: str) -> str:
     """Serves get_paragraph.
 
-    Sends the Abschnitt parameters to RIS exactly as given, each only when set, so empty parameters ask for the
-    most RIS holds. Returns full text for the first MAX_TEXTS documents RIS sent, in RIS order, and lists the
+    Sends each Abschnitt parameter only when set, suffixes in lower case as RIS labels them. Returns full text for the first MAX_TEXTS documents RIS sent, in RIS order, and lists the
     rest by label.
     """
-    number, to = number.strip(), to.strip()
+    number, to = number.strip().lower(), to.strip().lower()
     if (to or kind) and not number:
         return "to and kind need number; RIS ignores them without Abschnitt.Von."
 
@@ -249,7 +256,9 @@ async def get_paragraph(
     law: Annotated[str, Field(description=LAW_PARAM)],
     number: Annotated[str, Field(description=NUMBER_PARAM)] = "",
     to: Annotated[str, Field(description=TO_PARAM)] = "",
-    kind: Annotated[Literal["", "Paragraph", "Artikel", "Anlage"], Field(description=KIND_PARAM)] = "",
+    kind: Annotated[
+        Literal["", "Paragraph", "Artikel", "Anlage"], BeforeValidator(_kind), Field(description=KIND_PARAM)
+    ] = "",
     pick: Annotated[str, Field(description=PICK_PARAM)] = "",
     date: Annotated[str, Field(description=DATE_PARAM)] = "",
 ) -> str:
@@ -345,7 +354,7 @@ BGBL_TEXT_LIMIT = 6000
 # The authentic gazette in BgblAuth starts in 2004. Older issues are scanned PDFs outside this API.
 BGBL_AUTH_FROM = 2004
 # Optional Teil as I, II or III, optional "Nr.", then number/year.
-_BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b")
+_BGBL = re.compile(r"(?:\b(I{1,3})\b\.?\s*)?(?:Nr\.?\s*)?(\d+)\s*/\s*(\d{4})\b", re.IGNORECASE)
 
 
 @mcp.tool()
@@ -359,7 +368,7 @@ async def lookup_bgbl(
     match = _BGBL.search(reference)
     if not match:
         return f"Could not read a BGBl number from '{reference}'. Use a form like 'BGBl. I Nr. 50/2023'."
-    teil, number, year = match.group(1), match.group(2), int(match.group(3))
+    teil, number, year = (match.group(1) or "").upper(), match.group(2), int(match.group(3))
 
     teile = (len(teil),) if teil else (1, 2, 3)
     refs, _ = await rc.search_bgbl_auth(f"{number}/{year}", teile)

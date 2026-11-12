@@ -50,6 +50,10 @@ async def test_bgbl_teil_selects_its_own_entry(teil):
     assert out.endswith(server.SOURCE_AUTHENTIC)
 
 
+async def test_bgbl_reference_in_lower_case_keeps_its_teil():
+    assert (await server.lookup_bgbl(reference="bgbl. ii nr. 50/2023")).startswith("## BGBl. II Nr. 50/2023")
+
+
 async def test_bgbl_without_teil_lists_every_part():
     out = await server.lookup_bgbl(reference="50/2023")
     assert all(f"BGBl. {teil} Nr. 50/2023" in out for teil in ("I", "II", "III"))
@@ -145,6 +149,13 @@ async def test_every_document_ris_returns_gets_its_text():
 async def test_suffix_bound_narrows_to_that_unit():
     out = await server.get_paragraph(law="GewO", pick="10007517", number="365m1", kind="Paragraph")
     assert _shown(out, "Gewerbeordnung 1994") == ["§ 365m1"]
+
+
+async def test_capitalisation_of_number_and_kind_does_not_matter():
+    result = await server.mcp.call_tool(
+        "get_paragraph", {"law": "GewO", "pick": "10007517", "number": "365M1", "kind": "paragraph"}
+    )
+    assert _shown(result[0][0].text, "Gewerbeordnung 1994") == ["§ 365m1"]
 
 
 async def test_number_alone_returns_that_number_only():

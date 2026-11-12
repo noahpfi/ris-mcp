@@ -28,3 +28,18 @@ def no_upstream(monkeypatch):
         raise AssertionError("request reached RIS")
 
     monkeypatch.setattr(rc, "_fetch", refuse)
+
+
+@pytest.fixture(autouse=True)
+async def fresh_client(request):
+    """The shared httpx client binds to the event loop of its first request, and each live test runs its own loop."""
+    if request.node.get_closest_marker("live") is None:
+        yield
+        return
+    import asyncio
+
+    from src import ris_client as rc
+
+    rc._egress = asyncio.Semaphore(rc.MAX_UPSTREAM)
+    yield
+    await rc.close()

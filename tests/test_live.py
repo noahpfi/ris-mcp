@@ -2,7 +2,6 @@
 the cited laws stay in force, not wording."""
 from __future__ import annotations
 
-import asyncio
 import re
 
 import pytest
@@ -11,14 +10,6 @@ from src import ris_client as rc
 from src import server
 
 pytestmark = pytest.mark.live
-
-
-@pytest.fixture(autouse=True)
-async def fresh_client():
-    """The shared httpx client binds to the event loop of its first request, and each test runs its own loop."""
-    rc._egress = asyncio.Semaphore(rc.MAX_UPSTREAM)
-    yield
-    await rc.close()
 
 
 def _headings(out: str) -> list[str]:

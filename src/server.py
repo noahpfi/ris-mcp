@@ -11,6 +11,8 @@ from typing import Annotated, Any, Literal
 import anyio
 from pydantic import BeforeValidator, Field
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from mcp.types import Tool as MCPTool
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -121,7 +123,30 @@ def _transport_security() -> TransportSecuritySettings | None:
     )
 
 
-mcp = FastMCP(
+class StrictFastMCP(FastMCP):
+    """Refuses argument names a tool does not have. FastMCP drops them silently, so a guessed name such as
+    paragraph left number empty and returned the whole law."""
+
+    async def list_tools(self) -> list[MCPTool]:
+        return [
+            tool.model_copy(update={"inputSchema": {**tool.inputSchema, "additionalProperties": False}})
+            for tool in await super().list_tools()
+        ]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            known = tool.parameters.get("properties", {})
+            unknown = sorted(set(arguments or {}) - set(known))
+            if unknown:
+                required = set(tool.parameters.get("required", []))
+                params = ", ".join(f"{p} (required)" if p in required else p for p in known)
+                names = ", ".join(f"'{u}'" for u in unknown)
+                raise ToolError(f"{name} has no parameter {names}. Parameters: {params}.")
+        return await super().call_tool(name, arguments)
+
+
+mcp = StrictFastMCP(
     "ris-mcp",
     instructions=(
         "Independent open-source reader for Austria's public RIS OGD API. Not affiliated "
@@ -129,7 +154,8 @@ mcp = FastMCP(
         "RIS. Documents are returned as RIS serves them; consolidated law can be outdated or "
         "incomplete and is not legally binding — only the Bundesgesetzblatt (\"BGBl "
         "authentisch\") is. Treat results as research material, never as legal advice, and "
-        "keep the source note attached when quoting them."
+        "keep the source note attached when quoting them. Load a tool's parameter schema before calling it; "
+        "parameter names are not guessable."
     ),
     website_url="https://ris-mcp.noahpfister.com",
     dependencies=["httpx", "cachetools", "selectolax"],

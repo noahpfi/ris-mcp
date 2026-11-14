@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 from asgi_lifespan import LifespanManager
+from mcp.server.fastmcp.exceptions import ToolError
 
 from src import config, http_app, index
 from src.server import mcp
@@ -137,6 +138,29 @@ async def test_every_tool_parameter_reaches_the_client_with_its_description(clie
             description = schema.get("description", "")
             assert description, f"{tool['name']}.{name}"
             assert description.startswith("Optional") != (name in required), f"{tool['name']}.{name}"
+        assert tool["inputSchema"]["additionalProperties"] is False, tool["name"]
+
+
+async def test_unknown_argument_is_refused_with_the_parameters_before_any_request(no_upstream):
+    """A dropped name would leave its parameter at the default, e.g. paragraph instead of number gave the whole law."""
+    for tool in await mcp.list_tools():
+        schema = tool.inputSchema
+        arguments = {name: "x" for name in schema.get("required", [])} | {"paragraph": "41"}
+        with pytest.raises(ToolError) as excinfo:
+            await mcp.call_tool(tool.name, arguments)
+        message = str(excinfo.value)
+        assert f"{tool.name} has no parameter 'paragraph'" in message
+        assert all(name in message for name in schema["properties"])
+
+
+async def test_unknown_argument_reaches_the_client_as_an_error(client, no_upstream):
+    await _initialize(client)
+    response = await client.post("/mcp", headers=MCP_HEADERS, json=_rpc(
+        "tools/call", {"name": "get_paragraph", "arguments": {"law": "EStG", "paragraph": "41"}}, 3,
+    ))
+    result = _payload(response)["result"]
+    assert result["isError"] is True
+    assert "Parameters: law (required), number, to, kind, pick, date." in result["content"][0]["text"]
 
 
 async def test_tool_call_reaches_the_local_index(client):
